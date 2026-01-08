@@ -25,8 +25,17 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint src --ext .ts",
-    "prepublishOnly": "pnpm build"
+    "type-check": "tsc --noEmit",
+    "prepublishOnly": "pnpm build",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "bash -c 'pnpm type-check'"
+    ]
   },
   "keywords": [
     "curve",
@@ -48,9 +57,17 @@
   },
   "homepage": "https://github.com/michaeldim/curve-amm-math#readme",
   "devDependencies": {
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "@eslint/js": "^9.0.0",
     "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^1.0.0",
+    "eslint": "^9.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
+    "typescript-eslint": "^8.0.0",
     "vitest": "^1.0.0"
   },
   "peerDependencies": {

@@ -14,6 +14,24 @@ import {
   calcWithdrawOneCoin,
   A_PRECISION,
   FEE_DENOMINATOR,
+  // New functions to test
+  getVirtualPrice,
+  calcRemoveLiquidity,
+  calcRemoveLiquidityImbalance,
+  getSpotPrice,
+  getEffectivePrice,
+  getPriceImpact,
+  calcTokenFee,
+  getFeeAtBalance,
+  getAAtTime,
+  getDyUnderlying,
+  getDxUnderlying,
+  quoteSwap,
+  quoteAddLiquidity,
+  quoteRemoveLiquidityOneCoin,
+  getAmountOut,
+  getAmountIn,
+  type MetapoolParams,
 } from "./stableswap";
 
 describe("StableSwap Math", () => {
@@ -310,6 +328,331 @@ describe("StableSwap Math", () => {
       const [largeDy] = calcWithdrawOneCoin(largeLp, 0, balances, Ann, totalSupply, baseFee);
 
       expect(largeDy).toBeGreaterThan(smallDy);
+    });
+  });
+
+  describe("getVirtualPrice", () => {
+    it("should return 1e18 for empty pool", () => {
+      const balances = [0n, 0n];
+      const vp = getVirtualPrice(balances, Ann, 0n);
+      expect(vp).toBe(10n ** 18n);
+    });
+
+    it("should return D/totalSupply for non-empty pool", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const totalSupply = 2000n * 10n ** 18n;
+      const vp = getVirtualPrice(balances, Ann, totalSupply);
+      // Virtual price should be close to 1e18 for balanced pool
+      expect(vp).toBeGreaterThan(10n ** 18n - 10n ** 16n);
+      expect(vp).toBeLessThan(10n ** 18n + 10n ** 16n);
+    });
+
+    it("should increase over time with fees", () => {
+      // In practice, virtual price increases as fees are collected
+      // For our calculation, it's D/totalSupply
+      const balances = [1100n * 10n ** 18n, 1100n * 10n ** 18n]; // Pool grew from fees
+      const totalSupply = 2000n * 10n ** 18n; // Same supply
+      const vp = getVirtualPrice(balances, Ann, totalSupply);
+      expect(vp).toBeGreaterThan(10n ** 18n);
+    });
+  });
+
+  describe("calcRemoveLiquidity", () => {
+    const totalSupply = 2000n * 10n ** 18n;
+
+    it("should return proportional amounts", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const lpAmount = 200n * 10n ** 18n; // 10% of supply
+
+      const amounts = calcRemoveLiquidity(lpAmount, balances, totalSupply);
+
+      // Should get 10% of each balance
+      expect(amounts[0]).toBe(100n * 10n ** 18n);
+      expect(amounts[1]).toBe(100n * 10n ** 18n);
+    });
+
+    it("should return zero for empty pool", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const amounts = calcRemoveLiquidity(100n * 10n ** 18n, balances, 0n);
+      expect(amounts[0]).toBe(0n);
+      expect(amounts[1]).toBe(0n);
+    });
+  });
+
+  describe("calcRemoveLiquidityImbalance", () => {
+    const totalSupply = 2000n * 10n ** 18n;
+
+    it("should require LP tokens to remove imbalanced amounts", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const amounts = [100n * 10n ** 18n, 0n]; // Imbalanced withdrawal
+
+      const lpNeeded = calcRemoveLiquidityImbalance(amounts, balances, Ann, totalSupply, baseFee);
+
+      expect(lpNeeded).toBeGreaterThan(0n);
+      // Should be more than proportional due to imbalance fee
+      expect(lpNeeded).toBeGreaterThan(100n * 10n ** 18n);
+    });
+  });
+
+  describe("getSpotPrice", () => {
+    it("should return ~1:1 for balanced pool", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const spotPrice = getSpotPrice(0, 1, balances, Ann);
+
+      // Spot price should be close to 1e18 (1:1)
+      expect(spotPrice).toBeGreaterThan(10n ** 18n - 10n ** 16n);
+      expect(spotPrice).toBeLessThan(10n ** 18n + 10n ** 16n);
+    });
+
+    it("should reflect imbalance in pool", () => {
+      // More of token 1 means less valuable
+      const balances = [800n * 10n ** 18n, 1200n * 10n ** 18n];
+      const spotPrice01 = getSpotPrice(0, 1, balances, Ann);
+
+      // Swapping token 0 -> 1 should give more than 1:1
+      expect(spotPrice01).toBeGreaterThan(10n ** 18n);
+    });
+  });
+
+  describe("getEffectivePrice", () => {
+    it("should equal spot price for zero amount", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const effectivePrice = getEffectivePrice(0, 1, 0n, balances, Ann, baseFee, feeMultiplier);
+      const spotPrice = getSpotPrice(0, 1, balances, Ann);
+      expect(effectivePrice).toBe(spotPrice);
+    });
+
+    it("should be less than spot price for larger amounts", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const spotPrice = getSpotPrice(0, 1, balances, Ann);
+      const effectivePrice = getEffectivePrice(0, 1, 100n * 10n ** 18n, balances, Ann, baseFee, feeMultiplier);
+
+      expect(effectivePrice).toBeLessThan(spotPrice);
+    });
+  });
+
+  describe("getPriceImpact", () => {
+    it("should return 0 for small swaps", () => {
+      const balances = [10000n * 10n ** 18n, 10000n * 10n ** 18n];
+      const dx = 1n * 10n ** 18n; // Very small swap
+      const impact = getPriceImpact(0, 1, dx, balances, Ann, baseFee, feeMultiplier);
+
+      // Should be very small (< 10 bps)
+      expect(impact).toBeLessThan(10n);
+    });
+
+    it("should increase with swap size", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const smallImpact = getPriceImpact(0, 1, 10n * 10n ** 18n, balances, Ann, baseFee, feeMultiplier);
+      const largeImpact = getPriceImpact(0, 1, 100n * 10n ** 18n, balances, Ann, baseFee, feeMultiplier);
+
+      expect(largeImpact).toBeGreaterThan(smallImpact);
+    });
+  });
+
+  describe("calcTokenFee", () => {
+    it("should return 0 for empty pool", () => {
+      const balances = [0n, 0n];
+      const amounts = [100n * 10n ** 18n, 100n * 10n ** 18n];
+      const fee = calcTokenFee(amounts, balances, Ann, baseFee, true);
+      expect(fee).toBe(0n);
+    });
+
+    it("should return higher fee for imbalanced deposit", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const balancedAmounts = [100n * 10n ** 18n, 100n * 10n ** 18n];
+      const imbalancedAmounts = [200n * 10n ** 18n, 0n];
+
+      const balancedFee = calcTokenFee(balancedAmounts, balances, Ann, baseFee, true);
+      const imbalancedFee = calcTokenFee(imbalancedAmounts, balances, Ann, baseFee, true);
+
+      expect(imbalancedFee).toBeGreaterThan(balancedFee);
+    });
+  });
+
+  describe("getFeeAtBalance", () => {
+    it("should return baseFee for balanced pool", () => {
+      const balance = 1000n * 10n ** 18n;
+      const fee = getFeeAtBalance(balance, balance, baseFee, feeMultiplier);
+      expect(fee).toBe(baseFee);
+    });
+
+    it("should return higher fee for imbalanced pool", () => {
+      const fee = getFeeAtBalance(1000n * 10n ** 18n, 2000n * 10n ** 18n, baseFee, feeMultiplier);
+      expect(fee).toBeGreaterThan(baseFee);
+    });
+  });
+
+  describe("getAAtTime", () => {
+    it("should return initialA before ramp", () => {
+      const A = getAAtTime(100n, 200n, 1000n, 2000n, 500n);
+      expect(A).toBe(100n);
+    });
+
+    it("should return futureA after ramp", () => {
+      const A = getAAtTime(100n, 200n, 1000n, 2000n, 2500n);
+      expect(A).toBe(200n);
+    });
+
+    it("should interpolate during ramp (increasing)", () => {
+      const A = getAAtTime(100n, 200n, 1000n, 2000n, 1500n);
+      // Should be halfway: 150
+      expect(A).toBe(150n);
+    });
+
+    it("should interpolate during ramp (decreasing)", () => {
+      const A = getAAtTime(200n, 100n, 1000n, 2000n, 1500n);
+      // Should be halfway: 150
+      expect(A).toBe(150n);
+    });
+  });
+
+  describe("Metapool functions", () => {
+    // Create a simple metapool setup for testing
+    const createMetapoolParams = (): MetapoolParams => {
+      const baseBalances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const baseAnn = computeAnn(100n, 2);
+      const baseVirtualPrice = 10n ** 18n;
+
+      return {
+        balances: [1000n * 10n ** 18n, 1000n * 10n ** 18n],
+        Ann: computeAnn(100n, 2),
+        fee: baseFee,
+        feeMultiplier: feeMultiplier,
+        baseBalances,
+        baseAnn,
+        baseFee,
+        baseFeeMultiplier: feeMultiplier,
+        baseVirtualPrice,
+      };
+    };
+
+    describe("getDyUnderlying", () => {
+      it("should return 0 for same token swap", () => {
+        const params = createMetapoolParams();
+        const dy = getDyUnderlying(params, 0, 0, 10n * 10n ** 18n);
+        expect(dy).toBe(0n);
+      });
+
+      it("should return positive output for meta -> base underlying", () => {
+        const params = createMetapoolParams();
+        const dy = getDyUnderlying(params, 0, 1, 10n * 10n ** 18n);
+        expect(dy).toBeGreaterThan(0n);
+      });
+
+      it("should return positive output for base underlying -> meta", () => {
+        const params = createMetapoolParams();
+        const dy = getDyUnderlying(params, 1, 0, 10n * 10n ** 18n);
+        expect(dy).toBeGreaterThan(0n);
+      });
+
+      it("should return positive output for base -> base swap", () => {
+        const params = createMetapoolParams();
+        const dy = getDyUnderlying(params, 1, 2, 10n * 10n ** 18n);
+        expect(dy).toBeGreaterThan(0n);
+      });
+    });
+
+    describe("getDxUnderlying", () => {
+      it("should return 0 for dy = 0", () => {
+        const params = createMetapoolParams();
+        const dx = getDxUnderlying(params, 0, 1, 0n);
+        expect(dx).toBe(0n);
+      });
+
+      it("should find input needed for desired output", () => {
+        const params = createMetapoolParams();
+        const targetDy = 10n * 10n ** 18n;
+        const dx = getDxUnderlying(params, 0, 1, targetDy);
+        expect(dx).toBeGreaterThan(0n);
+
+        // Verify: using this dx should give approximately targetDy
+        const actualDy = getDyUnderlying(params, 0, 1, dx);
+        const tolerance = targetDy / 100n; // 1% tolerance
+        expect(actualDy).toBeGreaterThanOrEqual(targetDy - tolerance);
+      });
+    });
+  });
+
+  describe("quoteSwap", () => {
+    it("should return complete swap information", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const dx = 10n * 10n ** 18n;
+
+      const quote = quoteSwap(0, 1, dx, balances, Ann, baseFee, feeMultiplier);
+
+      expect(quote.amountOut).toBeGreaterThan(0n);
+      expect(quote.fee).toBeGreaterThanOrEqual(0n);
+      expect(quote.priceImpact).toBeGreaterThanOrEqual(0n);
+      expect(quote.effectivePrice).toBeGreaterThan(0n);
+      expect(quote.spotPrice).toBeGreaterThan(0n);
+    });
+
+    it("should have effective price less than spot price for large swaps", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const dx = 100n * 10n ** 18n;
+
+      const quote = quoteSwap(0, 1, dx, balances, Ann, baseFee, feeMultiplier);
+
+      expect(quote.effectivePrice).toBeLessThan(quote.spotPrice);
+    });
+  });
+
+  describe("quoteAddLiquidity", () => {
+    const totalSupply = 2000n * 10n ** 18n;
+
+    it("should return LP tokens and fee for deposit", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const amounts = [100n * 10n ** 18n, 100n * 10n ** 18n];
+
+      const quote = quoteAddLiquidity(amounts, balances, Ann, totalSupply, baseFee);
+
+      expect(quote.lpTokens).toBeGreaterThan(0n);
+      expect(quote.fee).toBeGreaterThanOrEqual(0n);
+      expect(quote.priceImpact).toBeGreaterThanOrEqual(0n);
+    });
+  });
+
+  describe("quoteRemoveLiquidityOneCoin", () => {
+    const totalSupply = 2000n * 10n ** 18n;
+
+    it("should return tokens and fee for withdrawal", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const lpAmount = 100n * 10n ** 18n;
+
+      const quote = quoteRemoveLiquidityOneCoin(lpAmount, 0, balances, Ann, totalSupply, baseFee);
+
+      expect(quote.lpTokens).toBeGreaterThan(0n); // Uses lpTokens field for output amount
+      expect(quote.fee).toBeGreaterThanOrEqual(0n);
+      expect(quote.priceImpact).toBeGreaterThanOrEqual(0n);
+    });
+  });
+
+  describe("getAmountOut", () => {
+    it("should return amount and min amount with slippage", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const dx = 10n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountOut, minAmountOut] = getAmountOut(0, 1, dx, balances, Ann, baseFee, feeMultiplier, slippageBps);
+
+      expect(amountOut).toBeGreaterThan(0n);
+      expect(minAmountOut).toBeLessThan(amountOut);
+      expect(minAmountOut).toBe((amountOut * 9900n) / 10000n);
+    });
+  });
+
+  describe("getAmountIn", () => {
+    it("should return amount and max amount with slippage", () => {
+      const balances = [1000n * 10n ** 18n, 1000n * 10n ** 18n];
+      const dy = 10n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountIn, maxAmountIn] = getAmountIn(0, 1, dy, balances, Ann, baseFee, feeMultiplier, slippageBps);
+
+      expect(amountIn).toBeGreaterThan(0n);
+      expect(maxAmountIn).toBeGreaterThan(amountIn);
+      expect(maxAmountIn).toBe((amountIn * 10100n) / 10000n);
     });
   });
 });

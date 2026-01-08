@@ -93,7 +93,19 @@ export async function batchRpcCalls(
     body: JSON.stringify(batch),
   });
 
-  const json = await response.json();
+  // Check HTTP status before parsing JSON
+  if (!response.ok) {
+    throw new Error(
+      `RPC request failed: HTTP ${response.status} ${response.statusText}`
+    );
+  }
+
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error(`RPC request failed: Invalid JSON response from ${rpcUrl}`);
+  }
 
   // Handle case where response is not an array
   if (!Array.isArray(json)) {

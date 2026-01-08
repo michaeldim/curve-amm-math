@@ -24,9 +24,28 @@ import {
   calcD3,
   calcTokenAmount3,
   calcWithdrawOneCoin3,
+  // New functions
+  getVirtualPrice,
+  getVirtualPrice3,
+  lpPrice,
+  lpPrice3,
+  calcRemoveLiquidity,
+  calcRemoveLiquidity3,
+  getSpotPrice,
+  getSpotPrice3,
+  getEffectivePrice,
+  getEffectivePrice3,
+  getPriceImpact,
+  getPriceImpact3,
+  getAGammaAtTime,
+  quoteSwap,
+  quoteSwap3,
+  getAmountOut,
+  getAmountOut3,
+  getAmountIn,
+  getAmountIn3,
   // Constants and types
   PRECISION,
-  FEE_DENOMINATOR,
   type CryptoSwapParams,
   type TricryptoParams,
 } from "./cryptoswap";
@@ -648,6 +667,401 @@ describe("Tricrypto (3-coin) Math", () => {
       const largeDy = calcWithdrawOneCoin3(params, largeLp, 0, totalSupply);
 
       expect(largeDy).toBeGreaterThan(smallDy);
+    });
+  });
+
+  describe("getVirtualPrice3", () => {
+    it("should return PRECISION for empty pool", () => {
+      const params = createTricryptoParams({
+        balances: [0n, 0n, 0n],
+      });
+      const vp = getVirtualPrice3(params, 0n);
+      expect(vp).toBe(PRECISION);
+    });
+
+    it("should return D/totalSupply for non-empty pool", () => {
+      const params = createTricryptoParams();
+      const totalSupply = 3000000n * 10n ** 18n;
+      const vp = getVirtualPrice3(params, totalSupply);
+
+      // Virtual price should be close to PRECISION for balanced pool
+      expect(vp).toBeGreaterThan(PRECISION - 10n ** 16n);
+      expect(vp).toBeLessThan(PRECISION * 2n);
+    });
+  });
+
+  describe("lpPrice3", () => {
+    it("should return PRECISION for empty pool", () => {
+      const params = createTricryptoParams({
+        balances: [0n, 0n, 0n],
+      });
+      const price = lpPrice3(params, 0n);
+      expect(price).toBe(PRECISION);
+    });
+
+    it("should return total value / supply", () => {
+      const params = createTricryptoParams();
+      const totalSupply = 3000000n * 10n ** 18n;
+      const price = lpPrice3(params, totalSupply);
+
+      expect(price).toBeGreaterThan(0n);
+    });
+  });
+
+  describe("calcRemoveLiquidity3", () => {
+    const totalSupply = 3000000n * 10n ** 18n;
+
+    it("should return proportional amounts", () => {
+      const params = createTricryptoParams();
+      const lpAmount = 300000n * 10n ** 18n; // 10% of supply
+
+      const [amount0, amount1, amount2] = calcRemoveLiquidity3(params, lpAmount, totalSupply);
+
+      // Should get 10% of each balance
+      expect(amount0).toBe(100000n * 10n ** 18n);
+      expect(amount1).toBe(100000n * 10n ** 18n);
+      expect(amount2).toBe(100000n * 10n ** 18n);
+    });
+
+    it("should return zero for empty pool", () => {
+      const params = createTricryptoParams();
+      const [a0, a1, a2] = calcRemoveLiquidity3(params, 100n * 10n ** 18n, 0n);
+      expect(a0).toBe(0n);
+      expect(a1).toBe(0n);
+      expect(a2).toBe(0n);
+    });
+  });
+
+  describe("getSpotPrice3", () => {
+    it("should return positive price", () => {
+      const params = createTricryptoParams();
+      const spotPrice = getSpotPrice3(params, 0, 1);
+      expect(spotPrice).toBeGreaterThan(0n);
+    });
+
+    it("should work for all directions", () => {
+      const params = createTricryptoParams();
+      const price01 = getSpotPrice3(params, 0, 1);
+      const price02 = getSpotPrice3(params, 0, 2);
+      const price12 = getSpotPrice3(params, 1, 2);
+
+      expect(price01).toBeGreaterThan(0n);
+      expect(price02).toBeGreaterThan(0n);
+      expect(price12).toBeGreaterThan(0n);
+    });
+  });
+
+  describe("getEffectivePrice3", () => {
+    it("should equal spot price for zero amount", () => {
+      const params = createTricryptoParams();
+      const effectivePrice = getEffectivePrice3(params, 0, 1, 0n);
+      const spotPrice = getSpotPrice3(params, 0, 1);
+      expect(effectivePrice).toBe(spotPrice);
+    });
+
+    it("should be less than spot price for large swaps", () => {
+      const params = createTricryptoParams();
+      const spotPrice = getSpotPrice3(params, 0, 1);
+      const effectivePrice = getEffectivePrice3(params, 0, 1, 10000n * 10n ** 18n);
+      expect(effectivePrice).toBeLessThan(spotPrice);
+    });
+  });
+
+  describe("getPriceImpact3", () => {
+    it("should return small impact for small swaps", () => {
+      const params = createTricryptoParams();
+      const impact = getPriceImpact3(params, 0, 1, 100n * 10n ** 18n);
+
+      // Should be small but positive
+      expect(impact).toBeGreaterThanOrEqual(0n);
+    });
+
+    it("should increase with swap size", () => {
+      const params = createTricryptoParams();
+      const smallImpact = getPriceImpact3(params, 0, 1, 100n * 10n ** 18n);
+      const largeImpact = getPriceImpact3(params, 0, 1, 10000n * 10n ** 18n);
+
+      expect(largeImpact).toBeGreaterThan(smallImpact);
+    });
+  });
+
+  describe("getAGammaAtTime (Tricrypto)", () => {
+    it("should return initial values before ramp", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 500n
+      );
+      expect(A).toBe(100n);
+      expect(gamma).toBe(1000n);
+    });
+
+    it("should return future values after ramp", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 2500n
+      );
+      expect(A).toBe(200n);
+      expect(gamma).toBe(2000n);
+    });
+
+    it("should interpolate during ramp", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 1500n
+      );
+      // Should be halfway: A=150, gamma=1500
+      expect(A).toBe(150n);
+      expect(gamma).toBe(1500n);
+    });
+  });
+
+  describe("quoteSwap3", () => {
+    it("should return complete quote", () => {
+      const params = createTricryptoParams();
+      const dx = 100n * 10n ** 18n;
+
+      const quote = quoteSwap3(params, 0, 1, dx);
+
+      expect(quote.amountOut).toBeGreaterThan(0n);
+      expect(quote.fee).toBeGreaterThanOrEqual(0n);
+      expect(quote.priceImpact).toBeGreaterThanOrEqual(0n);
+      expect(quote.effectivePrice).toBeGreaterThan(0n);
+      expect(quote.spotPrice).toBeGreaterThan(0n);
+    });
+  });
+
+  describe("getAmountOut3", () => {
+    it("should return amount and min amount with slippage", () => {
+      const params = createTricryptoParams();
+      const dx = 100n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountOut, minAmountOut] = getAmountOut3(params, 0, 1, dx, slippageBps);
+
+      expect(amountOut).toBeGreaterThan(0n);
+      expect(minAmountOut).toBeLessThan(amountOut);
+      expect(minAmountOut).toBe((amountOut * 9900n) / 10000n);
+    });
+  });
+
+  describe("getAmountIn3", () => {
+    it("should return amount and max amount with slippage", () => {
+      const params = createTricryptoParams();
+      const dy = 50n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountIn, maxAmountIn] = getAmountIn3(params, 0, 1, dy, slippageBps);
+
+      expect(amountIn).toBeGreaterThan(0n);
+      expect(maxAmountIn).toBeGreaterThan(amountIn);
+      expect(maxAmountIn).toBe((amountIn * 10100n) / 10000n);
+    });
+  });
+});
+
+// Additional tests for 2-coin new functions
+describe("CryptoSwap Additional Functions (2-coin)", () => {
+  const createParams = (
+    overrides: Partial<CryptoSwapParams> = {}
+  ): CryptoSwapParams => ({
+    A: 400000n,
+    gamma: 145000000000000n,
+    D: 2000000n * 10n ** 18n,
+    midFee: 3000000n,
+    outFee: 30000000n,
+    feeGamma: 230000000000000n,
+    priceScale: PRECISION,
+    balances: [1000000n * 10n ** 18n, 1000000n * 10n ** 18n],
+    precisions: [1n, 1n],
+    ...overrides,
+  });
+
+  const totalSupply = 2000000n * 10n ** 18n;
+
+  describe("getVirtualPrice", () => {
+    it("should return PRECISION for empty pool", () => {
+      const params = createParams({
+        balances: [0n, 0n],
+      });
+      const vp = getVirtualPrice(params, 0n);
+      expect(vp).toBe(PRECISION);
+    });
+
+    it("should return D/totalSupply for non-empty pool", () => {
+      const params = createParams();
+      const vp = getVirtualPrice(params, totalSupply);
+
+      expect(vp).toBeGreaterThan(PRECISION - 10n ** 16n);
+      expect(vp).toBeLessThan(PRECISION * 2n);
+    });
+  });
+
+  describe("lpPrice", () => {
+    it("should return PRECISION for empty pool", () => {
+      const params = createParams({
+        balances: [0n, 0n],
+      });
+      const price = lpPrice(params, 0n);
+      expect(price).toBe(PRECISION);
+    });
+
+    it("should return total value / supply", () => {
+      const params = createParams();
+      const price = lpPrice(params, totalSupply);
+
+      expect(price).toBeGreaterThan(0n);
+    });
+  });
+
+  describe("calcRemoveLiquidity", () => {
+    it("should return proportional amounts", () => {
+      const params = createParams();
+      const lpAmount = 200000n * 10n ** 18n; // 10% of supply
+
+      const [amount0, amount1] = calcRemoveLiquidity(params, lpAmount, totalSupply);
+
+      // Should get 10% of each balance
+      expect(amount0).toBe(100000n * 10n ** 18n);
+      expect(amount1).toBe(100000n * 10n ** 18n);
+    });
+
+    it("should return zero for empty pool", () => {
+      const params = createParams();
+      const [a0, a1] = calcRemoveLiquidity(params, 100n * 10n ** 18n, 0n);
+      expect(a0).toBe(0n);
+      expect(a1).toBe(0n);
+    });
+  });
+
+  describe("getSpotPrice", () => {
+    it("should return positive price", () => {
+      const params = createParams();
+      const spotPrice = getSpotPrice(params, 0, 1);
+      expect(spotPrice).toBeGreaterThan(0n);
+    });
+
+    it("should be close to 1:1 for balanced pool with 1:1 price scale", () => {
+      const params = createParams();
+      const spotPrice = getSpotPrice(params, 0, 1);
+      // Should be close to PRECISION (1e18)
+      expect(spotPrice).toBeGreaterThan(PRECISION - PRECISION / 10n);
+      expect(spotPrice).toBeLessThan(PRECISION + PRECISION / 10n);
+    });
+  });
+
+  describe("getEffectivePrice", () => {
+    it("should equal spot price for zero amount", () => {
+      const params = createParams();
+      const effectivePrice = getEffectivePrice(params, 0, 1, 0n);
+      const spotPrice = getSpotPrice(params, 0, 1);
+      expect(effectivePrice).toBe(spotPrice);
+    });
+
+    it("should be less than spot price for large swaps", () => {
+      const params = createParams();
+      const spotPrice = getSpotPrice(params, 0, 1);
+      const effectivePrice = getEffectivePrice(params, 0, 1, 10000n * 10n ** 18n);
+      expect(effectivePrice).toBeLessThan(spotPrice);
+    });
+  });
+
+  describe("getPriceImpact", () => {
+    it("should return small impact for small swaps", () => {
+      const params = createParams();
+      const impact = getPriceImpact(params, 0, 1, 100n * 10n ** 18n);
+
+      expect(impact).toBeGreaterThanOrEqual(0n);
+    });
+
+    it("should increase with swap size", () => {
+      const params = createParams();
+      const smallImpact = getPriceImpact(params, 0, 1, 100n * 10n ** 18n);
+      const largeImpact = getPriceImpact(params, 0, 1, 10000n * 10n ** 18n);
+
+      expect(largeImpact).toBeGreaterThan(smallImpact);
+    });
+  });
+
+  describe("getAGammaAtTime", () => {
+    it("should return initial values before ramp", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 500n
+      );
+      expect(A).toBe(100n);
+      expect(gamma).toBe(1000n);
+    });
+
+    it("should return future values after ramp", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 2500n
+      );
+      expect(A).toBe(200n);
+      expect(gamma).toBe(2000n);
+    });
+
+    it("should interpolate during ramp (both increasing)", () => {
+      const [A, gamma] = getAGammaAtTime(
+        100n, 200n, 1000n, 2000n, 1000n, 2000n, 1500n
+      );
+      expect(A).toBe(150n);
+      expect(gamma).toBe(1500n);
+    });
+
+    it("should interpolate during ramp (A decreasing, gamma increasing)", () => {
+      const [A, gamma] = getAGammaAtTime(
+        200n, 100n, 1000n, 3000n, 1000n, 2000n, 1500n
+      );
+      expect(A).toBe(150n);
+      expect(gamma).toBe(2000n);
+    });
+  });
+
+  describe("quoteSwap", () => {
+    it("should return complete quote", () => {
+      const params = createParams();
+      const dx = 100n * 10n ** 18n;
+
+      const quote = quoteSwap(params, 0, 1, dx);
+
+      expect(quote.amountOut).toBeGreaterThan(0n);
+      expect(quote.fee).toBeGreaterThanOrEqual(0n);
+      expect(quote.priceImpact).toBeGreaterThanOrEqual(0n);
+      expect(quote.effectivePrice).toBeGreaterThan(0n);
+      expect(quote.spotPrice).toBeGreaterThan(0n);
+    });
+
+    it("should have effective price less than spot price for large swaps", () => {
+      const params = createParams();
+      const dx = 10000n * 10n ** 18n;
+
+      const quote = quoteSwap(params, 0, 1, dx);
+
+      expect(quote.effectivePrice).toBeLessThan(quote.spotPrice);
+    });
+  });
+
+  describe("getAmountOut", () => {
+    it("should return amount and min amount with slippage", () => {
+      const params = createParams();
+      const dx = 100n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountOut, minAmountOut] = getAmountOut(params, 0, 1, dx, slippageBps);
+
+      expect(amountOut).toBeGreaterThan(0n);
+      expect(minAmountOut).toBeLessThan(amountOut);
+      expect(minAmountOut).toBe((amountOut * 9900n) / 10000n);
+    });
+  });
+
+  describe("getAmountIn", () => {
+    it("should return amount and max amount with slippage", () => {
+      const params = createParams();
+      const dy = 50n * 10n ** 18n;
+      const slippageBps = 100; // 1%
+
+      const [amountIn, maxAmountIn] = getAmountIn(params, 0, 1, dy, slippageBps);
+
+      expect(amountIn).toBeGreaterThan(0n);
+      expect(maxAmountIn).toBeGreaterThan(amountIn);
+      expect(maxAmountIn).toBe((amountIn * 10100n) / 10000n);
     });
   });
 });

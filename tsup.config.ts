@@ -9,4 +9,8 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
+  minify: true,
+  target: "es2020", // BigInt support
+  splitting: true, // Code splitting for smaller bundles
+  treeshake: true, // Remove unused code
 });
