@@ -524,6 +524,7 @@ describe("StableSwap Math", () => {
         baseFee,
         baseFeeMultiplier: feeMultiplier,
         baseVirtualPrice,
+        baseTotalSupply: 2000n * 10n ** 18n, // Total LP supply of base pool
       };
     };
 
