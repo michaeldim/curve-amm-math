@@ -50,12 +50,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/michaeldim/curve-amm-math.git"
+    "url": "git+https://github.com/yldfi/curve-amm-math.git"
   },
   "bugs": {
-    "url": "https://github.com/michaeldim/curve-amm-math/issues"
+    "url": "https://github.com/yldfi/curve-amm-math/issues"
   },
-  "homepage": "https://github.com/michaeldim/curve-amm-math#readme",
+  "homepage": "https://github.com/yldfi/curve-amm-math#readme",
   "publishConfig": {
     "access": "public"
   },
