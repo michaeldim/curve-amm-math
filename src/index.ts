@@ -62,6 +62,10 @@
 export * as stableswap from "./stableswap";
 export type { StableSwapPoolParams } from "./stableswap";
 
+// Exact precision StableSwap (matches on-chain within ±1 unit)
+export * as stableswapExact from "./stableswap-exact";
+export type { ExactPoolParams } from "./stableswap-exact";
+
 // CryptoSwap math (for volatile asset pairs)
 // Supports both Twocrypto-NG (2 coins) and Tricrypto-NG (3 coins)
 export * as cryptoswap from "./cryptoswap";

@@ -40,8 +40,18 @@ import {
  * @param xp - Normalized pool balances (same decimals, in wei)
  * @param Ann - A * A_PRECISION * N_COINS (pre-computed)
  * @returns D invariant value
+ * @throws Error if any balance is zero (division by zero protection)
  */
 export function getD(xp: bigint[], Ann: bigint): bigint {
+  // Guard against too few coins
+  if (xp.length < 2) {
+    throw new Error(`getD: pool must have at least 2 coins (got ${xp.length})`);
+  }
+  // Guard against Ann = 0 (would cause invalid denominator calculation)
+  if (Ann === 0n) {
+    throw new Error("getD: Ann cannot be zero");
+  }
+
   const N = BigInt(xp.length);
   const N_COINS_POW = N ** N; // n^n
 
@@ -51,6 +61,13 @@ export function getD(xp: bigint[], Ann: bigint): bigint {
     S += x;
   }
   if (S === 0n) return 0n;
+
+  // Check for zero balances (would cause division by zero in Newton iteration)
+  for (const x of xp) {
+    if (x === 0n) {
+      throw new Error("getD: zero balance would cause division by zero");
+    }
+  }
 
   let D = S;
 
@@ -74,11 +91,11 @@ export function getD(xp: bigint[], Ann: bigint): bigint {
 
     // Convergence check
     if (D > Dprev ? D - Dprev <= 1n : Dprev - D <= 1n) {
-      break;
+      return D;
     }
   }
 
-  return D;
+  throw new Error("getD did not converge");
 }
 
 /**
@@ -92,6 +109,7 @@ export function getD(xp: bigint[], Ann: bigint): bigint {
  * @param Ann - A * A_PRECISION * N_COINS
  * @param D - Invariant (from getD)
  * @returns New value of y[j]
+ * @throws Error if i === j, indices out of bounds, or zero balance in calculation
  */
 export function getY(
   i: number,
@@ -101,14 +119,28 @@ export function getY(
   Ann: bigint,
   D: bigint
 ): bigint {
-  const N = BigInt(xp.length);
+  const nCoins = xp.length;
+
+  // Input validation
+  if (i === j) {
+    throw new Error("getY: i and j must be different");
+  }
+  if (i < 0 || i >= nCoins || j < 0 || j >= nCoins) {
+    throw new Error(`getY: index out of bounds (i=${i}, j=${j}, nCoins=${nCoins})`);
+  }
+  // Guard against Ann = 0 (would cause division by zero)
+  if (Ann === 0n) {
+    throw new Error("getY: Ann cannot be zero");
+  }
+
+  const N = BigInt(nCoins);
 
   // c = D^(n+1) / (n^n * prod(x_k for k != j) * Ann * n)
   // b = S' + D / (Ann * n) where S' = sum(x_k for k != j)
   let c = D;
   let S = 0n;
 
-  for (let k = 0; k < xp.length; k++) {
+  for (let k = 0; k < nCoins; k++) {
     let _x: bigint;
     if (k === i) {
       _x = x;
@@ -116,6 +148,10 @@ export function getY(
       _x = xp[k];
     } else {
       continue;
+    }
+    // Zero balance protection
+    if (_x === 0n) {
+      throw new Error(`getY: zero balance at index ${k} would cause division by zero`);
     }
     S += _x;
     c = (c * D) / (_x * N);
@@ -129,14 +165,19 @@ export function getY(
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const prevY = y;
     // y = (y^2 + c) / (2y + b - D)
-    y = (y * y + c) / (2n * y + b - D);
+    const denom = 2n * y + b - D;
+    // Guard against zero or negative denominator (negative can occur in extreme pool imbalance)
+    if (denom <= 0n) {
+      throw new Error("getY: denominator (2y + b - D) is non-positive");
+    }
+    y = (y * y + c) / denom;
 
     if (y > prevY ? y - prevY <= 1n : prevY - y <= 1n) {
-      break;
+      return y;
     }
   }
 
-  return y;
+  throw new Error("getY did not converge");
 }
 
 /**
@@ -158,6 +199,9 @@ export function dynamicFee(
   if (feeMultiplier <= FEE_DENOMINATOR) return baseFee;
 
   const xps2 = (xpi + xpj) ** 2n;
+  // Guard against zero sum (would cause division by zero)
+  if (xps2 === 0n) return baseFee;
+
   return (
     (feeMultiplier * baseFee) /
     (((feeMultiplier - FEE_DENOMINATOR) * 4n * xpi * xpj) / xps2 + FEE_DENOMINATOR)
@@ -175,7 +219,7 @@ export function dynamicFee(
  * @param Ann - A * A_PRECISION * N_COINS
  * @param baseFee - Base fee from pool
  * @param feeMultiplier - Off-peg fee multiplier from pool
- * @returns Expected output amount after fees
+ * @returns Expected output amount after fees (0n for invalid inputs or negative results)
  */
 export function getDy(
   i: number,
@@ -186,6 +230,13 @@ export function getDy(
   baseFee: bigint,
   feeMultiplier: bigint
 ): bigint {
+  const nCoins = xp.length;
+
+  // Input validation - return 0n for invalid swaps
+  if (i === j) return 0n;
+  if (i < 0 || i >= nCoins || j < 0 || j >= nCoins) return 0n;
+  if (dx === 0n) return 0n;
+
   // Calculate new x after input
   const newXp = [...xp];
   newXp[i] = xp[i] + dx;
@@ -193,6 +244,9 @@ export function getDy(
   const D = getD(xp, Ann);
   const y = getY(i, j, newXp[i], xp, Ann, D);
   const dy = xp[j] - y - 1n; // -1 for rounding
+
+  // Clamp negative outputs to 0
+  if (dy <= 0n) return 0n;
 
   // Fee uses AVERAGE of pre and post xp values (matches Views contract)
   const fee = dynamicFee(
@@ -203,7 +257,8 @@ export function getDy(
   );
   const feeAmount = (dy * fee) / FEE_DENOMINATOR;
 
-  return dy - feeAmount;
+  const result = dy - feeAmount;
+  return result > 0n ? result : 0n;
 }
 
 /**
@@ -250,12 +305,27 @@ export function findPegPoint(
 }
 
 /**
+ * Validate slippage bounds
+ * @param slippageBps - Slippage in basis points
+ * @throws Error if slippage is negative or > 10000 (100%)
+ */
+function validateSlippageBps(slippageBps: number): void {
+  if (slippageBps < 0 || slippageBps > 10000) {
+    throw new Error(
+      `Invalid slippageBps: ${slippageBps}. Must be between 0 and 10000 (0-100%)`
+    );
+  }
+}
+
+/**
  * Calculate min output with slippage tolerance
  * @param expectedOutput - Expected output from getDy
  * @param slippageBps - Slippage in basis points (100 = 1%)
  * @returns min_dy value accounting for slippage
+ * @throws Error if slippageBps is out of bounds
  */
 export function calculateMinDy(expectedOutput: bigint, slippageBps: number): string {
+  validateSlippageBps(slippageBps);
   const minDy = (expectedOutput * BigInt(10000 - slippageBps)) / BigInt(10000);
   return minDy.toString();
 }
@@ -283,6 +353,12 @@ export function validateSlippage(slippage: string | undefined): number {
  * @param isAPrecise - Whether A is already multiplied by A_PRECISION
  */
 export function computeAnn(A: bigint, nCoins: number, isAPrecise: boolean = false): bigint {
+  if (A === 0n) {
+    throw new Error("computeAnn: A parameter cannot be zero");
+  }
+  if (nCoins < 2) {
+    throw new Error(`computeAnn: nCoins must be at least 2 (got ${nCoins})`);
+  }
   const N = BigInt(nCoins);
   if (isAPrecise) {
     return A * N;
@@ -294,6 +370,7 @@ export function computeAnn(A: bigint, nCoins: number, isAPrecise: boolean = fals
  * Pool parameters needed for off-chain calculations
  */
 export interface StableSwapPoolParams {
+  /** Pool balances (normalized to 18 decimals if precisions provided) */
   balances: bigint[];
   A: bigint;
   Ann: bigint;
@@ -302,6 +379,12 @@ export interface StableSwapPoolParams {
   nCoins: number;
   /** Total LP token supply (needed for liquidity calculations) */
   totalSupply?: bigint;
+  /** Precision multipliers: 10^(18 - token_decimals) for each token */
+  precisions?: bigint[];
+  /** Original token decimals (if fetched) */
+  decimals?: number[];
+  /** Raw balances in native token decimals (before normalization) */
+  rawBalances?: bigint[];
 }
 
 /**
@@ -314,17 +397,33 @@ export interface StableSwapPoolParams {
  * @param Ann - A * A_PRECISION * N_COINS
  * @param D - Target D invariant
  * @returns Value of y[i] that satisfies invariant with given D
+ * @throws Error if index out of bounds or zero balance in calculation
  */
 export function getYD(i: number, xp: bigint[], Ann: bigint, D: bigint): bigint {
-  const N = BigInt(xp.length);
+  const nCoins = xp.length;
+
+  // Input validation
+  if (i < 0 || i >= nCoins) {
+    throw new Error(`getYD: index out of bounds (i=${i}, nCoins=${nCoins})`);
+  }
+  // Guard against Ann = 0 (would cause division by zero)
+  if (Ann === 0n) {
+    throw new Error("getYD: Ann cannot be zero");
+  }
+
+  const N = BigInt(nCoins);
 
   // c = D^(n+1) / (n^n * prod(x_k for k != i) * Ann * n)
   // S = sum(x_k for k != i)
   let c = D;
   let S = 0n;
 
-  for (let k = 0; k < xp.length; k++) {
+  for (let k = 0; k < nCoins; k++) {
     if (k !== i) {
+      // Zero balance protection
+      if (xp[k] === 0n) {
+        throw new Error(`getYD: zero balance at index ${k} would cause division by zero`);
+      }
       S += xp[k];
       c = (c * D) / (xp[k] * N);
     }
@@ -338,14 +437,19 @@ export function getYD(i: number, xp: bigint[], Ann: bigint, D: bigint): bigint {
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const prevY = y;
     // y = (y^2 + c) / (2y + b - D)
-    y = (y * y + c) / (2n * y + b - D);
+    const denom = 2n * y + b - D;
+    // Guard against zero or negative denominator (negative can occur in extreme pool imbalance)
+    if (denom <= 0n) {
+      throw new Error("getYD: denominator (2y + b - D) is non-positive");
+    }
+    y = (y * y + c) / denom;
 
     if (y > prevY ? y - prevY <= 1n : prevY - y <= 1n) {
-      break;
+      return y;
     }
   }
 
-  return y;
+  throw new Error("getYD did not converge");
 }
 
 /**
@@ -359,7 +463,7 @@ export function getYD(i: number, xp: bigint[], Ann: bigint, D: bigint): bigint {
  * @param Ann - A * A_PRECISION * N_COINS
  * @param baseFee - Base fee from pool
  * @param feeMultiplier - Off-peg fee multiplier from pool
- * @returns Required input amount to receive dy output
+ * @returns Required input amount to receive dy output (0n for invalid inputs)
  */
 export function getDx(
   i: number,
@@ -370,6 +474,11 @@ export function getDx(
   baseFee: bigint,
   feeMultiplier: bigint
 ): bigint {
+  const nCoins = xp.length;
+
+  // Input validation - return 0n for invalid swaps
+  if (i === j) return 0n;
+  if (i < 0 || i >= nCoins || j < 0 || j >= nCoins) return 0n;
   if (dy === 0n) return 0n;
   if (dy >= xp[j]) return 0n; // Can't withdraw more than pool has
 
@@ -378,6 +487,9 @@ export function getDx(
   // Estimate fee to gross up dy
   // Use current balances for fee estimation (approximation)
   const fee = dynamicFee(xp[i], xp[j], baseFee, feeMultiplier);
+
+  // Guard against fee >= FEE_DENOMINATOR (would cause division by zero or negative)
+  if (fee >= FEE_DENOMINATOR) return 0n;
 
   // Gross up dy to account for fee (dy_before_fee = dy * FEE_DENOM / (FEE_DENOM - fee))
   const dyWithFee = (dy * FEE_DENOMINATOR) / (FEE_DENOMINATOR - fee);
@@ -422,14 +534,38 @@ export function calcTokenAmount(
   totalSupply: bigint,
   fee: bigint
 ): bigint {
-  const N = BigInt(xp.length);
   const N_COINS = xp.length;
 
+  // Input validation
+  if (N_COINS < 2) {
+    throw new Error("calcTokenAmount: pool must have at least 2 coins");
+  }
+  if (amounts.length !== N_COINS) {
+    throw new Error(`calcTokenAmount: amounts length (${amounts.length}) must match pool size (${N_COINS})`);
+  }
+
+  const N = BigInt(N_COINS);
   const D0 = getD(xp, Ann);
   if (D0 === 0n && totalSupply === 0n) {
     // First deposit - LP tokens = D
     const newXp = amounts.map((a, idx) => xp[idx] + a);
     return getD(newXp, Ann);
+  }
+
+  // Guard against D0 = 0 with non-zero supply (invalid pool state)
+  if (D0 === 0n) {
+    throw new Error("calcTokenAmount: pool invariant D is zero");
+  }
+
+  // For withdrawals, validate amounts don't exceed balances
+  if (!isDeposit) {
+    for (let idx = 0; idx < N_COINS; idx++) {
+      if (amounts[idx] > xp[idx]) {
+        throw new Error(
+          `calcTokenAmount: withdrawal amount[${idx}] (${amounts[idx]}) exceeds balance (${xp[idx]})`
+        );
+      }
+    }
   }
 
   // Calculate new balances
@@ -463,6 +599,8 @@ export function calcTokenAmount(
   }
 
   const diff = isDeposit ? D2 - D0 : D0 - D2;
+  // Clamp to zero to handle edge cases where precision loss could result in negative
+  if (diff <= 0n) return 0n;
   return (totalSupply * diff) / D0;
 }
 
@@ -486,10 +624,39 @@ export function calcWithdrawOneCoin(
   totalSupply: bigint,
   fee: bigint
 ): [bigint, bigint] {
-  const N = BigInt(xp.length);
   const N_COINS = xp.length;
 
+  // Input validation
+  if (N_COINS < 2) {
+    throw new Error("calcWithdrawOneCoin: pool must have at least 2 coins");
+  }
+  if (i < 0 || i >= N_COINS) {
+    throw new Error(`calcWithdrawOneCoin: index out of bounds (i=${i}, nCoins=${N_COINS})`);
+  }
+  if (totalSupply === 0n) {
+    throw new Error("calcWithdrawOneCoin: totalSupply cannot be zero");
+  }
+  if (tokenAmount > totalSupply) {
+    throw new Error(
+      `calcWithdrawOneCoin: tokenAmount (${tokenAmount}) exceeds totalSupply (${totalSupply})`
+    );
+  }
+  if (tokenAmount === 0n) {
+    return [0n, 0n];
+  }
+
+  // Special case: 100% withdrawal returns entire balance of token i (no fee for draining pool)
+  if (tokenAmount === totalSupply) {
+    return [xp[i], 0n];
+  }
+
+  const N = BigInt(N_COINS);
   const D0 = getD(xp, Ann);
+
+  // Guard against D0 = 0 (invalid pool state)
+  if (D0 === 0n) {
+    throw new Error("calcWithdrawOneCoin: pool invariant D is zero");
+  }
 
   // D1 = D0 - tokenAmount * D0 / totalSupply
   const D1 = D0 - (tokenAmount * D0) / totalSupply;
@@ -560,6 +727,11 @@ export function calcRemoveLiquidity(
   totalSupply: bigint
 ): bigint[] {
   if (totalSupply === 0n) return xp.map(() => 0n);
+  if (tokenAmount > totalSupply) {
+    throw new Error(
+      `calcRemoveLiquidity: tokenAmount (${tokenAmount}) exceeds totalSupply (${totalSupply})`
+    );
+  }
   return xp.map((bal) => (bal * tokenAmount) / totalSupply);
 }
 
@@ -583,10 +755,36 @@ export function calcRemoveLiquidityImbalance(
 ): bigint {
   // This is essentially the inverse of calcTokenAmount for withdrawal
   // We calculate how many LP tokens need to be burned to get these amounts out
-  const N = BigInt(xp.length);
   const N_COINS = xp.length;
 
+  // Input validation
+  if (N_COINS < 2) {
+    throw new Error("calcRemoveLiquidityImbalance: pool must have at least 2 coins");
+  }
+  if (amounts.length !== N_COINS) {
+    throw new Error(`calcRemoveLiquidityImbalance: amounts length (${amounts.length}) must match pool size (${N_COINS})`);
+  }
+  if (totalSupply === 0n) {
+    throw new Error("calcRemoveLiquidityImbalance: totalSupply cannot be zero");
+  }
+
+  const N = BigInt(N_COINS);
   const D0 = getD(xp, Ann);
+
+  // Guard against D0 === 0n (would cause division by zero)
+  if (D0 === 0n) {
+    throw new Error("calcRemoveLiquidityImbalance: pool invariant D is zero");
+  }
+
+  // Validate withdrawal amounts don't exceed balances
+  for (let idx = 0; idx < N_COINS; idx++) {
+    if (amounts[idx] > xp[idx]) {
+      throw new Error(
+        `calcRemoveLiquidityImbalance: withdrawal amount[${idx}] (${amounts[idx]}) exceeds balance (${xp[idx]})`
+      );
+    }
+  }
+
   const newXp = xp.map((bal, idx) => bal - amounts[idx]);
   const D1 = getD(newXp, Ann);
 
@@ -602,6 +800,12 @@ export function calcRemoveLiquidityImbalance(
   }
 
   const D2 = getD(xpReduced, Ann);
+
+  // Guard against D2 > D0 (numerical edge case with extreme fees)
+  if (D2 > D0) {
+    return 0n;
+  }
+
   const lpTokens = ((D0 - D2) * totalSupply) / D0;
 
   return lpTokens + 1n; // Round up
@@ -627,6 +831,16 @@ export function getSpotPrice(
   xp: bigint[],
   Ann: bigint
 ): bigint {
+  const N_COINS = xp.length;
+  if (i < 0 || i >= N_COINS) {
+    throw new Error(`getSpotPrice: index i out of bounds (i=${i}, nCoins=${N_COINS})`);
+  }
+  if (j < 0 || j >= N_COINS) {
+    throw new Error(`getSpotPrice: index j out of bounds (j=${j}, nCoins=${N_COINS})`);
+  }
+  if (i === j) {
+    throw new Error("getSpotPrice: cannot get price of same token (i === j)");
+  }
   // Use very small dx to approximate derivative
   const dx = 10n ** 12n; // 0.000001 tokens
   const D = getD(xp, Ann);
@@ -722,6 +936,9 @@ export function calcTokenFee(
   const N = BigInt(xp.length);
   const N_COINS = xp.length;
 
+  // Guard against N < 2 (would cause division by zero in tokenFee calculation)
+  if (N_COINS < 2) return 0n;
+
   const D0 = getD(xp, Ann);
   if (D0 === 0n) return 0n;
 
@@ -784,6 +1001,11 @@ export function getAAtTime(
   futureTime: bigint,
   currentTime: bigint
 ): bigint {
+  // Validate time parameters
+  if (futureTime <= initialTime) {
+    throw new Error("getAAtTime: futureTime must be greater than initialTime");
+  }
+
   if (currentTime >= futureTime) {
     return futureA;
   }
@@ -825,8 +1047,10 @@ export interface MetapoolParams {
   baseFee: bigint;
   /** Base pool offpeg multiplier */
   baseFeeMultiplier: bigint;
-  /** Base pool virtual price */
+  /** Base pool virtual price (D / totalSupply, 18 decimals) */
   baseVirtualPrice: bigint;
+  /** Base pool total LP token supply (required for liquidity calculations) */
+  baseTotalSupply: bigint;
 }
 
 /**
@@ -837,7 +1061,7 @@ export interface MetapoolParams {
  * @param i - Input token index (0 = meta, 1+ = base underlying)
  * @param j - Output token index (0 = meta, 1+ = base underlying)
  * @param dx - Input amount
- * @returns Output amount
+ * @returns Output amount (0n for invalid inputs)
  */
 export function getDyUnderlying(
   params: MetapoolParams,
@@ -855,7 +1079,15 @@ export function getDyUnderlying(
     baseFee,
     baseFeeMultiplier,
     baseVirtualPrice,
+    baseTotalSupply,
   } = params;
+
+  const maxIdx = 1 + baseBalances.length; // meta (0) + base underlyings
+
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i >= maxIdx || j < 0 || j >= maxIdx) return 0n;
+  if (dx === 0n) return 0n;
 
   // Normalize metapool balances using base virtual price
   const xp: [bigint, bigint] = [
@@ -863,22 +1095,19 @@ export function getDyUnderlying(
     (balances[1] * baseVirtualPrice) / 10n ** 18n,
   ];
 
-  if (i === 0 && j === 0) return 0n;
-
   // Meta -> Base underlying
   if (i === 0) {
     // First swap meta -> base LP in metapool
     const dyBaseLp = getDy(0, 1, dx, xp, Ann, fee, feeMultiplier);
-    // Scale base LP to underlying amount
-    const baseAmount = (dyBaseLp * baseVirtualPrice) / 10n ** 18n;
+    if (dyBaseLp === 0n) return 0n;
     // Then withdraw from base pool (single-sided)
     const baseIdx = j - 1;
     const [dyUnderlying] = calcWithdrawOneCoin(
-      baseAmount,
+      dyBaseLp,
       baseIdx,
       baseBalances,
       baseAnn,
-      baseVirtualPrice, // Using virtual price as proxy for total supply
+      baseTotalSupply, // Fixed: use totalSupply, not virtualPrice
       baseFee
     );
     return dyUnderlying;
@@ -894,10 +1123,11 @@ export function getDyUnderlying(
       true,
       baseBalances,
       baseAnn,
-      baseVirtualPrice,
+      baseTotalSupply, // Fixed: use totalSupply, not virtualPrice
       baseFee
     );
-    // Normalize LP to value terms
+    if (baseLpReceived === 0n) return 0n;
+    // Normalize LP to value terms for metapool swap
     const baseLpValue = (baseLpReceived * baseVirtualPrice) / 10n ** 18n;
     // Then swap base LP -> meta in metapool
     const xpAfter: [bigint, bigint] = [
@@ -907,9 +1137,10 @@ export function getDyUnderlying(
     const D = getD(xp, Ann);
     const y = getY(1, 0, xpAfter[1], xp, Ann, D);
     let dy = xp[0] - y - 1n;
+    if (dy <= 0n) return 0n;
     const dynamicFeeAmt = dynamicFee(xpAfter[1], y, fee, feeMultiplier);
     dy = dy - (dy * dynamicFeeAmt) / FEE_DENOMINATOR;
-    return dy;
+    return dy > 0n ? dy : 0n;
   }
 
   // Base underlying -> Base underlying (through base pool directly)
@@ -944,6 +1175,12 @@ export function getDxUnderlying(
 ): bigint {
   if (dy === 0n) return 0n;
 
+  // Index validation
+  const totalCoins = 1 + params.baseBalances.length; // metapool token + base pool tokens
+  if (i < 0 || i >= totalCoins || j < 0 || j >= totalCoins || i === j) {
+    return 0n;
+  }
+
   // Binary search for dx
   const maxBalance = i === 0 ? params.balances[0] : params.baseBalances[i - 1];
   let low = 0n;
@@ -968,6 +1205,10 @@ export function getDxUnderlying(
 
     if (high - low <= 1n) break;
   }
+
+  // Guard: verify the result actually achieves the desired output
+  const dyAtHigh = getDyUnderlying(params, i, j, high);
+  if (dyAtHigh < dy) return 0n; // dy is not achievable
 
   return high;
 }
@@ -1073,7 +1314,8 @@ export function quoteAddLiquidity(
   // Calculate price impact by comparing to proportional deposit
   const D0 = getD(xp, Ann);
   const totalDeposit = amounts.reduce((a, b) => a + b, 0n);
-  const proportionalLp = totalSupply > 0n
+  // Guard against D0 = 0 with non-zero supply (invalid pool state)
+  const proportionalLp = totalSupply > 0n && D0 > 0n
     ? (totalDeposit * totalSupply) / D0
     : totalDeposit;
   const priceImpact = proportionalLp > 0n
@@ -1151,6 +1393,7 @@ export function getAmountOut(
   feeMultiplier: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountOut = getDy(i, j, dx, xp, Ann, baseFee, feeMultiplier);
   const minAmountOut = (amountOut * BigInt(10000 - slippageBps)) / 10000n;
   return [amountOut, minAmountOut];
@@ -1179,6 +1422,7 @@ export function getAmountIn(
   feeMultiplier: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountIn = getDx(i, j, dy, xp, Ann, baseFee, feeMultiplier);
   const maxAmountIn = (amountIn * BigInt(10000 + slippageBps)) / 10000n;
   return [amountIn, maxAmountIn];

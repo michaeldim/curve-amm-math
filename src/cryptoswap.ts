@@ -108,11 +108,40 @@ export function newtonY(
 ): bigint {
   const N_COINS = 2n;
 
+  // Guard against invalid index
+  if (i < 0 || i > 1) {
+    throw new Error(`newtonY: index out of bounds (i=${i}, must be 0 or 1)`);
+  }
+  // Guard against wrong array length
+  if (x.length !== 2) {
+    throw new Error(`newtonY: x array must have exactly 2 elements (got ${x.length})`);
+  }
+  // Guard against zero parameters (would cause division by zero)
+  if (A === 0n) {
+    throw new Error("newtonY: A cannot be zero");
+  }
+  if (gamma === 0n) {
+    throw new Error("newtonY: gamma cannot be zero");
+  }
+
   // x_j is the other token's balance (not the one we're solving for)
   const x_j = x[1 - i];
 
+  // Guard against zero balance (would cause division by zero)
+  if (x_j === 0n) {
+    throw new Error("newtonY: zero balance would cause division by zero");
+  }
+  if (D === 0n) {
+    throw new Error("newtonY: D cannot be zero");
+  }
+
   // Initial guess: y = D^2 / (x_j * N^2)
   let y = (D * D) / (x_j * N_COINS * N_COINS);
+
+  // Guard against y = 0 (can occur when D^2 < x_j * 4, i.e., tiny D relative to balance)
+  if (y === 0n) {
+    throw new Error("newtonY: initial y estimate is zero (D too small relative to balance)");
+  }
 
   // K0_i = (10^18 * N) * x_j / D
   const K0_i = (PRECISION * N_COINS * x_j) / D;
@@ -159,12 +188,25 @@ export function newtonY(
     let yfprime: bigint;
     if (yfprime_base < _dyfprime) {
       y = y_prev / 2n;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
       continue;
     } else {
       yfprime = yfprime_base - _dyfprime;
     }
 
+    // Guard against y = 0 (would cause division by zero)
+    if (y === 0n) {
+      throw new Error("newtonY: y became zero during iteration, cannot converge");
+    }
+    // Guard against fprime = 0 (would cause division by zero)
     const fprime = yfprime / y;
+    if (fprime === 0n) {
+      throw new Error("newtonY: fprime is zero, cannot divide");
+    }
+    // Guard against K0 = 0 (would cause division by zero)
+    if (K0 === 0n) {
+      throw new Error("newtonY: K0 is zero, cannot divide");
+    }
     const y_minus_base = mul1 / fprime;
     const y_plus =
       (yfprime + PRECISION * D) / fprime + (y_minus_base * PRECISION) / K0;
@@ -172,8 +214,10 @@ export function newtonY(
 
     if (y_plus < y_minus) {
       y = y_prev / 2n;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
     } else {
       y = y_plus - y_minus;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
     }
 
     const diff = y > y_prev ? y - y_prev : y_prev - y;
@@ -183,7 +227,7 @@ export function newtonY(
     }
   }
 
-  return y;
+  throw new Error("newtonY did not converge");
 }
 
 /**
@@ -206,14 +250,49 @@ export function newtonY3(
   const N_COINS = 3n;
   const N_COINS_POW = 27n; // 3^3
 
+  // Guard against invalid index
+  if (i < 0 || i > 2) {
+    throw new Error(`newtonY3: index out of bounds (i=${i}, must be 0, 1, or 2)`);
+  }
+  // Guard against wrong array length
+  if (x.length !== 3) {
+    throw new Error(`newtonY3: x array must have exactly 3 elements (got ${x.length})`);
+  }
+  // Guard against zero parameters (would cause division by zero)
+  if (A === 0n) {
+    throw new Error("newtonY3: A cannot be zero");
+  }
+  if (gamma === 0n) {
+    throw new Error("newtonY3: gamma cannot be zero");
+  }
+  if (D === 0n) {
+    throw new Error("newtonY3: D cannot be zero");
+  }
+
   // Sum and product of other balances (excluding i)
   let S = 0n;
   let prod = PRECISION;
   for (let k = 0; k < 3; k++) {
     if (k !== i) {
+      // Guard against zero balance
+      if (x[k] === 0n) {
+        throw new Error(`newtonY3: zero balance at index ${k} would cause division by zero`);
+      }
       S += x[k];
       prod = (prod * x[k]) / PRECISION;
     }
+  }
+
+  // Guard against tiny liquidity where D^2/PRECISION would be 0
+  const D_squared = D * D;
+  const D_squared_scaled = D_squared / PRECISION;
+  if (D_squared_scaled === 0n) {
+    throw new Error("newtonY3: D is too small (D^2/PRECISION = 0), pool has insufficient liquidity");
+  }
+
+  // Guard against zero prod (shouldn't happen given balance checks, but be safe)
+  if (prod === 0n) {
+    throw new Error("newtonY3: prod is zero, balances too small");
   }
 
   // Initial guess: y = D^3 / (N^N * prod(x_k for k != i))
@@ -221,7 +300,7 @@ export function newtonY3(
 
   // K0_i = (10^18 * N^(N-1)) * prod(x_k for k != i) / D^(N-1)
   // For N=3: K0_i = 9 * 10^18 * prod / D^2
-  const K0_i = (PRECISION * 9n * prod) / ((D * D) / PRECISION);
+  const K0_i = (PRECISION * 9n * prod) / D_squared_scaled;
 
   // Convergence limit
   const convergence_limit = (() => {
@@ -266,12 +345,25 @@ export function newtonY3(
     let yfprime: bigint;
     if (yfprime_base < _dyfprime) {
       y = y_prev / 2n;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
       continue;
     } else {
       yfprime = yfprime_base - _dyfprime;
     }
 
+    // Guard against y = 0 (would cause division by zero)
+    if (y === 0n) {
+      throw new Error("newtonY3: y became zero during iteration, cannot converge");
+    }
+    // Guard against fprime = 0 (would cause division by zero)
     const fprime = yfprime / y;
+    if (fprime === 0n) {
+      throw new Error("newtonY3: fprime is zero, cannot divide");
+    }
+    // Guard against K0 = 0 (would cause division by zero)
+    if (K0 === 0n) {
+      throw new Error("newtonY3: K0 is zero, cannot divide");
+    }
     const y_minus_base = mul1 / fprime;
     const y_plus =
       (yfprime + PRECISION * D) / fprime + (y_minus_base * PRECISION) / K0;
@@ -279,8 +371,10 @@ export function newtonY3(
 
     if (y_plus < y_minus) {
       y = y_prev / 2n;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
     } else {
       y = y_plus - y_minus;
+      if (y === 0n) y = 1n; // Prevent division by zero in next iteration
     }
 
     const diff = y > y_prev ? y - y_prev : y_prev - y;
@@ -290,7 +384,7 @@ export function newtonY3(
     }
   }
 
-  return y;
+  throw new Error("newtonY3 did not converge");
 }
 
 /**
@@ -302,6 +396,17 @@ export function newtonY3(
  * @returns D invariant
  */
 export function calcD(A: bigint, gamma: bigint, xp: bigint[]): bigint {
+  // Input validation
+  if (A === 0n) {
+    throw new Error("calcD: A parameter cannot be zero");
+  }
+  if (gamma === 0n) {
+    throw new Error("calcD: gamma parameter cannot be zero");
+  }
+  if (xp.length < 2) {
+    throw new Error("calcD: pool must have at least 2 coins");
+  }
+
   const N = BigInt(xp.length);
   const N_POW = N ** N;
 
@@ -309,7 +414,16 @@ export function calcD(A: bigint, gamma: bigint, xp: bigint[]): bigint {
   for (const x of xp) {
     S += x;
   }
+  // Empty pool (all zeros) - return 0n
   if (S === 0n) return 0n;
+
+  // Check for partial zero balances (would propagate 0 through K0 calculation)
+  // Only check after S > 0 since an empty pool is valid
+  for (let idx = 0; idx < xp.length; idx++) {
+    if (xp[idx] === 0n) {
+      throw new Error(`calcD: zero balance at index ${idx} would cause invalid K0 calculation`);
+    }
+  }
 
   let D = S;
 
@@ -336,6 +450,11 @@ export function calcD(A: bigint, gamma: bigint, xp: bigint[]): bigint {
     const neg_fprime =
       S + (S * mul2) / PRECISION + (mul1 * N) / D - (PRECISION + mul2) * N;
 
+    // Guard against neg_fprime = 0 (would cause division by zero)
+    if (neg_fprime === 0n) {
+      throw new Error("calcD: neg_fprime is zero, cannot divide");
+    }
+
     const D_plus = (D * (neg_fprime + S)) / neg_fprime;
     const D_minus = (D * D) / neg_fprime;
 
@@ -351,7 +470,7 @@ export function calcD(A: bigint, gamma: bigint, xp: bigint[]): bigint {
     }
   }
 
-  return D;
+  throw new Error("calcD did not converge");
 }
 
 /**
@@ -384,7 +503,11 @@ export function dynamicFee(
     K = (K * x) / sum;
   }
 
-  const f = (feeGamma * PRECISION) / (feeGamma + PRECISION - K);
+  // Guard against zero/negative denominator
+  const denominator = feeGamma + PRECISION - K;
+  if (denominator <= 0n) return outFee; // Max fee for extreme imbalance
+
+  const f = (feeGamma * PRECISION) / denominator;
   return (midFee * f + outFee * (PRECISION - f)) / PRECISION;
 }
 
@@ -430,9 +553,12 @@ function unscaleOutput2(
   precisions: [bigint, bigint],
   priceScale: bigint
 ): bigint {
+  // Guard against zero precision/priceScale
+  if (precisions[j] === 0n) return 0n;
   if (j === 0) {
     return dy / precisions[0];
   }
+  if (priceScale === 0n) return 0n;
   return (dy * PRECISION) / (precisions[1] * priceScale);
 }
 
@@ -445,11 +571,15 @@ function unscaleOutput3(
   precisions: [bigint, bigint, bigint],
   priceScales: [bigint, bigint]
 ): bigint {
+  // Guard against zero precision/priceScale
+  if (precisions[j] === 0n) return 0n;
   if (j === 0) {
     return dy / precisions[0];
   } else if (j === 1) {
+    if (priceScales[0] === 0n) return 0n;
     return (dy * PRECISION) / (precisions[1] * priceScales[0]);
   }
+  if (priceScales[1] === 0n) return 0n;
   return (dy * PRECISION) / (precisions[2] * priceScales[1]);
 }
 
@@ -459,6 +589,7 @@ function unscaleOutput3(
 
 /**
  * Off-chain implementation of Twocrypto get_dy
+ * @returns Output amount (0n for invalid inputs)
  */
 export function getDy(
   params: TwocryptoParams,
@@ -466,6 +597,9 @@ export function getDy(
   j: number,
   dx: bigint
 ): bigint {
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 1 || j < 0 || j > 1) return 0n;
   if (dx === 0n) return 0n;
 
   const { A, gamma, D, midFee, outFee, feeGamma, priceScale, balances } = params;
@@ -489,18 +623,20 @@ export function getDy(
   const xp_after: [bigint, bigint] = [xp[0], xp[1]];
   xp_after[j] = y;
 
+  // Apply dynamic fee BEFORE unscaling (for precision)
+  const fee = dynamicFee(xp_after, feeGamma, midFee, outFee);
+  dy = dy - (dy * fee) / FEE_DENOMINATOR;
+  if (dy <= 0n) return 0n;
+
   // Convert dy back to external units
   dy = unscaleOutput2(dy, j, precisions, priceScale);
 
-  // Apply dynamic fee
-  const fee = dynamicFee(xp_after, feeGamma, midFee, outFee);
-  dy = dy - (dy * fee) / FEE_DENOMINATOR;
-
-  return dy;
+  return dy > 0n ? dy : 0n;
 }
 
 /**
  * Off-chain implementation of Tricrypto get_dy
+ * @returns Output amount (0n for invalid inputs)
  */
 export function getDy3(
   params: TricryptoParams,
@@ -508,6 +644,9 @@ export function getDy3(
   j: number,
   dx: bigint
 ): bigint {
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 2 || j < 0 || j > 2) return 0n;
   if (dx === 0n) return 0n;
 
   const { A, gamma, D, midFee, outFee, feeGamma, priceScales, balances } = params;
@@ -531,19 +670,21 @@ export function getDy3(
   const xp_after: [bigint, bigint, bigint] = [...xp];
   xp_after[j] = y;
 
+  // Apply dynamic fee BEFORE unscaling (for precision)
+  const fee = dynamicFee(xp_after, feeGamma, midFee, outFee);
+  dy = dy - (dy * fee) / FEE_DENOMINATOR;
+  if (dy <= 0n) return 0n;
+
   // Convert dy back to external units
   dy = unscaleOutput3(dy, j, precisions, priceScales);
 
-  // Apply dynamic fee
-  const fee = dynamicFee(xp_after, feeGamma, midFee, outFee);
-  dy = dy - (dy * fee) / FEE_DENOMINATOR;
-
-  return dy;
+  return dy > 0n ? dy : 0n;
 }
 
 /**
  * Calculate get_dx for 2-coin CryptoSwap (input needed for desired output)
  * Uses binary search for accuracy with dynamic fees
+ * @returns Required input amount (0n for invalid inputs)
  */
 export function getDx(
   params: TwocryptoParams,
@@ -551,12 +692,43 @@ export function getDx(
   j: number,
   dy: bigint
 ): bigint {
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 1 || j < 0 || j > 1) return 0n;
   if (dy === 0n) return 0n;
   if (dy >= params.balances[j]) return 0n;
 
+  // 1. Initial estimate using spot price (more accurate than balance heuristic)
+  const spotPrice = getSpotPrice(params, i, j);
+  let high: bigint;
+
+  if (spotPrice > 0n) {
+    // dx ~= dy / price, with 2x safety margin for slippage
+    high = (dy * PRECISION * 2n) / spotPrice;
+  } else {
+    // Fallback if price is 0 (empty pool edge case)
+    high = params.balances[i] * 10n;
+  }
+
+  // Ensure high is at least non-zero
+  if (high === 0n) high = PRECISION;
+
+  // 2. Expand upper bound if insufficient (exponential search)
+  // Double up to 10 times (1024x) to handle high slippage or imbalanced pools
+  for (let k = 0; k < 10; k++) {
+    const dyAtHigh = getDy(params, i, j, high);
+    if (dyAtHigh >= dy) break;
+    high = high * 2n;
+  }
+
+  // Guard: after expansion, if we still can't reach dy, return 0n
+  const dyAtFinalHigh = getDy(params, i, j, high);
+  if (dyAtFinalHigh < dy) return 0n;
+
+  // 3. Binary search for precise dx
   let low = 0n;
-  let high = params.balances[i] * 10n;
-  const tolerance = dy / 10000n;
+  // Fix: ensure tolerance is at least 1n to avoid zero tolerance for small dy
+  const tolerance = dy / 10000n > 0n ? dy / 10000n : 1n;
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const mid = (low + high) / 2n;
@@ -582,6 +754,7 @@ export function getDx(
 
 /**
  * Calculate get_dx for 3-coin CryptoSwap (input needed for desired output)
+ * @returns Required input amount (0n for invalid inputs)
  */
 export function getDx3(
   params: TricryptoParams,
@@ -589,12 +762,43 @@ export function getDx3(
   j: number,
   dy: bigint
 ): bigint {
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 2 || j < 0 || j > 2) return 0n;
   if (dy === 0n) return 0n;
   if (dy >= params.balances[j]) return 0n;
 
+  // 1. Initial estimate using spot price (more accurate than balance heuristic)
+  const spotPrice = getSpotPrice3(params, i, j);
+  let high: bigint;
+
+  if (spotPrice > 0n) {
+    // dx ~= dy / price, with 2x safety margin for slippage
+    high = (dy * PRECISION * 2n) / spotPrice;
+  } else {
+    // Fallback if price is 0 (empty pool edge case)
+    high = params.balances[i] * 10n;
+  }
+
+  // Ensure high is at least non-zero
+  if (high === 0n) high = PRECISION;
+
+  // 2. Expand upper bound if insufficient (exponential search)
+  // Double up to 10 times (1024x) to handle high slippage or imbalanced pools
+  for (let k = 0; k < 10; k++) {
+    const dyAtHigh = getDy3(params, i, j, high);
+    if (dyAtHigh >= dy) break;
+    high = high * 2n;
+  }
+
+  // Guard: after expansion, if we still can't reach dy, return 0n
+  const dyAtFinalHigh = getDy3(params, i, j, high);
+  if (dyAtFinalHigh < dy) return 0n;
+
+  // 3. Binary search for precise dx
   let low = 0n;
-  let high = params.balances[i] * 10n;
-  const tolerance = dy / 10000n;
+  // Fix: ensure tolerance is at least 1n to avoid zero tolerance for small dy
+  const tolerance = dy / 10000n > 0n ? dy / 10000n : 1n;
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const mid = (low + high) / 2n;
@@ -714,6 +918,11 @@ export function calcTokenAmount(
     return D1;
   }
 
+  // Guard against D0 === 0n (invalid pool state with non-zero supply)
+  if (D0 === 0n) {
+    throw new Error("calcTokenAmount: pool invariant D is zero");
+  }
+
   const diff = D1 - D0;
   return (totalSupply * diff) / D0;
 }
@@ -743,6 +952,11 @@ export function calcTokenAmount3(
     return D1;
   }
 
+  // Guard against D0 === 0n (invalid pool state with non-zero supply)
+  if (D0 === 0n) {
+    throw new Error("calcTokenAmount3: pool invariant D is zero");
+  }
+
   const diff = D1 - D0;
   return (totalSupply * diff) / D0;
 }
@@ -756,7 +970,22 @@ export function calcWithdrawOneCoin(
   i: number,
   totalSupply: bigint
 ): bigint {
+  // Input validation
+  if (i < 0 || i > 1) return 0n;
+  if (totalSupply === 0n) {
+    throw new Error("calcWithdrawOneCoin: totalSupply cannot be zero");
+  }
+  if (tokenAmount === 0n) return 0n;
+  if (tokenAmount > totalSupply) {
+    throw new Error("calcWithdrawOneCoin: tokenAmount exceeds totalSupply");
+  }
+
   const precisions = params.precisions ?? [1n, 1n];
+
+  // Special case: full withdrawal returns entire balance of token i
+  if (tokenAmount === totalSupply) {
+    return params.balances[i];
+  }
 
   const xp = scaleBalances(params.balances, precisions, params.priceScale);
   const D0 = calcD(params.A, params.gamma, xp);
@@ -767,12 +996,14 @@ export function calcWithdrawOneCoin(
   let dy = xp[i] - newY;
   if (dy < 0n) return 0n;
 
-  dy = unscaleOutput2(dy, i, precisions, params.priceScale);
-
+  // Apply dynamic fee BEFORE unscaling (for precision)
   const fee = dynamicFee(xp, params.feeGamma, params.midFee, params.outFee);
   dy = dy - (dy * fee) / FEE_DENOMINATOR;
+  if (dy <= 0n) return 0n;
 
-  return dy;
+  dy = unscaleOutput2(dy, i, precisions, params.priceScale);
+
+  return dy > 0n ? dy : 0n;
 }
 
 /**
@@ -784,7 +1015,22 @@ export function calcWithdrawOneCoin3(
   i: number,
   totalSupply: bigint
 ): bigint {
+  // Input validation
+  if (i < 0 || i > 2) return 0n;
+  if (totalSupply === 0n) {
+    throw new Error("calcWithdrawOneCoin3: totalSupply cannot be zero");
+  }
+  if (tokenAmount === 0n) return 0n;
+  if (tokenAmount > totalSupply) {
+    throw new Error("calcWithdrawOneCoin3: tokenAmount exceeds totalSupply");
+  }
+
   const precisions = params.precisions ?? [1n, 1n, 1n];
+
+  // Special case: full withdrawal returns entire balance of token i
+  if (tokenAmount === totalSupply) {
+    return params.balances[i];
+  }
 
   const xp = scaleBalances3(params.balances, precisions, params.priceScales);
   const D0 = calcD(params.A, params.gamma, xp);
@@ -795,12 +1041,14 @@ export function calcWithdrawOneCoin3(
   let dy = xp[i] - newY;
   if (dy < 0n) return 0n;
 
-  dy = unscaleOutput3(dy, i, precisions, params.priceScales);
-
+  // Apply dynamic fee BEFORE unscaling (for precision)
   const fee = dynamicFee(xp, params.feeGamma, params.midFee, params.outFee);
   dy = dy - (dy * fee) / FEE_DENOMINATOR;
+  if (dy <= 0n) return 0n;
 
-  return dy;
+  dy = unscaleOutput3(dy, i, precisions, params.priceScales);
+
+  return dy > 0n ? dy : 0n;
 }
 
 /**
@@ -812,6 +1060,11 @@ export function calcRemoveLiquidity(
   totalSupply: bigint
 ): [bigint, bigint] {
   if (totalSupply === 0n) return [0n, 0n];
+  if (tokenAmount > totalSupply) {
+    throw new Error(
+      `calcRemoveLiquidity: tokenAmount (${tokenAmount}) exceeds totalSupply (${totalSupply})`
+    );
+  }
   return [
     (params.balances[0] * tokenAmount) / totalSupply,
     (params.balances[1] * tokenAmount) / totalSupply,
@@ -827,6 +1080,11 @@ export function calcRemoveLiquidity3(
   totalSupply: bigint
 ): [bigint, bigint, bigint] {
   if (totalSupply === 0n) return [0n, 0n, 0n];
+  if (tokenAmount > totalSupply) {
+    throw new Error(
+      `calcRemoveLiquidity3: tokenAmount (${tokenAmount}) exceeds totalSupply (${totalSupply})`
+    );
+  }
   return [
     (params.balances[0] * tokenAmount) / totalSupply,
     (params.balances[1] * tokenAmount) / totalSupply,
@@ -903,28 +1161,60 @@ export function lpPrice3(
 
 /**
  * Get spot price (2-coin)
+ * Uses precision-scaled epsilon for accurate derivative calculation
+ * @returns Spot price (0n for invalid inputs)
  */
 export function getSpotPrice(
   params: TwocryptoParams,
   i: number,
   j: number
 ): bigint {
-  const dx = DERIVATIVE_EPSILON;
-  const dy = getDy(params, i, j, dx);
-  return (dy * PRECISION) / dx;
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 1 || j < 0 || j > 1) return 0n;
+
+  // Scale epsilon by input token precision to handle non-18-decimal tokens
+  // For 18-decimal: precision=1, dx=10^12 (small amount)
+  // For 6-decimal: precision=10^12, dx=10^12/10^12=1 (1 unit)
+  const precisions = params.precisions ?? [1n, 1n];
+  // Guard against zero precision
+  if (precisions[i] === 0n) return 0n;
+  const dx = DERIVATIVE_EPSILON / precisions[i];
+
+  // Ensure dx is at least 1
+  const safeDx = dx > 0n ? dx : 1n;
+  const dy = getDy(params, i, j, safeDx);
+  if (safeDx === 0n) return 0n;
+
+  return (dy * PRECISION) / safeDx;
 }
 
 /**
  * Get spot price (3-coin)
+ * Uses precision-scaled epsilon for accurate derivative calculation
+ * @returns Spot price (0n for invalid inputs)
  */
 export function getSpotPrice3(
   params: TricryptoParams,
   i: number,
   j: number
 ): bigint {
-  const dx = DERIVATIVE_EPSILON;
-  const dy = getDy3(params, i, j, dx);
-  return (dy * PRECISION) / dx;
+  // Input validation
+  if (i === j) return 0n;
+  if (i < 0 || i > 2 || j < 0 || j > 2) return 0n;
+
+  // Scale epsilon by input token precision to handle non-18-decimal tokens
+  const precisions = params.precisions ?? [1n, 1n, 1n];
+  // Guard against zero precision
+  if (precisions[i] === 0n) return 0n;
+  const dx = DERIVATIVE_EPSILON / precisions[i];
+
+  // Ensure dx is at least 1
+  const safeDx = dx > 0n ? dx : 1n;
+  const dy = getDy3(params, i, j, safeDx);
+  if (safeDx === 0n) return 0n;
+
+  return (dy * PRECISION) / safeDx;
 }
 
 /**
@@ -1005,6 +1295,10 @@ export function getAGammaAtTime(
   futureTime: bigint,
   currentTime: bigint
 ): [bigint, bigint] {
+  // Validate futureTime > initialTime to prevent division by zero
+  if (futureTime <= initialTime) {
+    throw new Error("getAGammaAtTime: futureTime must be greater than initialTime");
+  }
   if (currentTime >= futureTime) {
     return [futureA, futureGamma];
   }
@@ -1060,7 +1354,9 @@ export function quoteSwap(
   const precisions = params.precisions ?? [1n, 1n];
   const xp = scaleBalances(params.balances, precisions, params.priceScale);
   const fee = dynamicFee(xp, params.feeGamma, params.midFee, params.outFee);
-  const feeAmount = (amountOut * fee) / (FEE_DENOMINATOR - fee);
+
+  // Guard against fee >= FEE_DENOMINATOR (would cause division by zero or negative)
+  const feeAmount = fee >= FEE_DENOMINATOR ? 0n : (amountOut * fee) / (FEE_DENOMINATOR - fee);
 
   return {
     amountOut,
@@ -1090,7 +1386,9 @@ export function quoteSwap3(
   const precisions = params.precisions ?? [1n, 1n, 1n];
   const xp = scaleBalances3(params.balances, precisions, params.priceScales);
   const fee = dynamicFee(xp, params.feeGamma, params.midFee, params.outFee);
-  const feeAmount = (amountOut * fee) / (FEE_DENOMINATOR - fee);
+
+  // Guard against fee >= FEE_DENOMINATOR (would cause division by zero or negative)
+  const feeAmount = fee >= FEE_DENOMINATOR ? 0n : (amountOut * fee) / (FEE_DENOMINATOR - fee);
 
   return {
     amountOut,
@@ -1099,6 +1397,19 @@ export function quoteSwap3(
     effectivePrice,
     spotPrice,
   };
+}
+
+/**
+ * Validate slippage bounds
+ * @param slippageBps - Slippage in basis points
+ * @throws Error if slippage is negative or > 10000 (100%)
+ */
+function validateSlippageBps(slippageBps: number): void {
+  if (slippageBps < 0 || slippageBps > 10000) {
+    throw new Error(
+      `Invalid slippageBps: ${slippageBps}. Must be between 0 and 10000 (0-100%)`
+    );
+  }
 }
 
 /**
@@ -1111,6 +1422,7 @@ export function getAmountOut(
   dx: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountOut = getDy(params, i, j, dx);
   const minAmountOut = (amountOut * BigInt(10000 - slippageBps)) / BPS_DENOMINATOR;
   return [amountOut, minAmountOut];
@@ -1126,6 +1438,7 @@ export function getAmountOut3(
   dx: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountOut = getDy3(params, i, j, dx);
   const minAmountOut = (amountOut * BigInt(10000 - slippageBps)) / BPS_DENOMINATOR;
   return [amountOut, minAmountOut];
@@ -1141,6 +1454,7 @@ export function getAmountIn(
   dy: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountIn = getDx(params, i, j, dy);
   const maxAmountIn = (amountIn * BigInt(10000 + slippageBps)) / BPS_DENOMINATOR;
   return [amountIn, maxAmountIn];
@@ -1156,6 +1470,7 @@ export function getAmountIn3(
   dy: bigint,
   slippageBps: number
 ): [bigint, bigint] {
+  validateSlippageBps(slippageBps);
   const amountIn = getDx3(params, i, j, dy);
   const maxAmountIn = (amountIn * BigInt(10000 + slippageBps)) / BPS_DENOMINATOR;
   return [amountIn, maxAmountIn];
@@ -1165,6 +1480,7 @@ export function getAmountIn3(
  * Calculate min output with slippage tolerance
  */
 export function calculateMinDy(expectedOutput: bigint, slippageBps: number): string {
+  validateSlippageBps(slippageBps);
   const minDy = (expectedOutput * BigInt(10000 - slippageBps)) / BPS_DENOMINATOR;
   return minDy.toString();
 }
@@ -1173,6 +1489,7 @@ export function calculateMinDy(expectedOutput: bigint, slippageBps: number): str
  * Calculate max input with slippage tolerance
  */
 export function calculateMaxDx(expectedInput: bigint, slippageBps: number): string {
+  validateSlippageBps(slippageBps);
   const maxDx = (expectedInput * BigInt(10000 + slippageBps)) / BPS_DENOMINATOR;
   return maxDx.toString();
 }
