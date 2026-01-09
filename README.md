@@ -1,9 +1,17 @@
-# curve-amm-math
+<p align="center">
+  <img src="logo-128.png" alt="yldfi" width="128" height="128">
+</p>
 
-Off-chain TypeScript implementations of Curve AMM math for gas-free calculations.
+<h1 align="center">@yldfi/curve-amm-math</h1>
 
-[![npm version](https://badge.fury.io/js/curve-amm-math.svg)](https://www.npmjs.com/package/curve-amm-math)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  Off-chain TypeScript implementations of Curve AMM math for local quote calculations
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@yldfi/curve-amm-math"><img src="https://badge.fury.io/js/@yldfi%2Fcurve-amm-math.svg" alt="npm version"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
 ## Features
 
@@ -19,16 +27,16 @@ Off-chain TypeScript implementations of Curve AMM math for gas-free calculations
 ## Installation
 
 ```bash
-npm install curve-amm-math
+npm install @yldfi/curve-amm-math
 # or
-pnpm add curve-amm-math
+pnpm add @yldfi/curve-amm-math
 # or
-yarn add curve-amm-math
+yarn add @yldfi/curve-amm-math
 ```
 
 For RPC utilities:
 ```bash
-npm install curve-amm-math viem
+npm install @yldfi/curve-amm-math viem
 ```
 
 ## Usage
@@ -36,7 +44,7 @@ npm install curve-amm-math viem
 ### StableSwap (pegged assets)
 
 ```typescript
-import { stableswap } from 'curve-amm-math';
+import { stableswap } from '@yldfi/curve-amm-math';
 
 // Pool parameters
 const balances = [1000n * 10n**18n, 1100n * 10n**18n];
@@ -66,7 +74,7 @@ const virtualPrice = stableswap.getVirtualPrice(balances, Ann, totalSupply);
 ### CryptoSwap (volatile assets)
 
 ```typescript
-import { cryptoswap } from 'curve-amm-math';
+import { cryptoswap } from '@yldfi/curve-amm-math';
 
 // 2-coin pool (Twocrypto-NG)
 const params: cryptoswap.TwocryptoParams = {
@@ -122,7 +130,7 @@ This replicates Vyper's exact operation order and handles all asset types correc
 - When standard stableswap gives ~0.01% difference and you need exact
 
 ```typescript
-import { stableswapExact } from 'curve-amm-math';
+import { stableswapExact } from '@yldfi/curve-amm-math';
 
 // For standard ERC20 tokens, compute rates from decimals
 // rates = 10^(36 - decimals) for each token
@@ -148,7 +156,7 @@ const dx = stableswapExact.getDxExact(0, 1, 1000n * 10n**6n, params);
 **For pools with oracle/ERC4626 tokens**, fetch rates from the contract:
 
 ```typescript
-import { stableswapExact } from 'curve-amm-math';
+import { stableswapExact } from '@yldfi/curve-amm-math';
 import { getExactStableSwapParams } from 'curve-amm-math/rpc';
 
 // Fetch params including dynamic rates from stored_rates()
@@ -167,7 +175,7 @@ const dy = stableswapExact.getDyExact(0, 1, dx, {
 ### RPC Utilities (optional)
 
 ```typescript
-import { stableswap, cryptoswap } from 'curve-amm-math';
+import { stableswap, cryptoswap } from '@yldfi/curve-amm-math';
 import { getStableSwapParams, getCryptoSwapParams, getOnChainDy } from 'curve-amm-math/rpc';
 
 const rpcUrl = 'https://eth.llamarpc.com';
@@ -323,7 +331,7 @@ The math implementations are tested against known values. For production use wit
 3. **Integration tests**: Run periodic checks against mainnet pools
 
 ```typescript
-import { stableswap } from 'curve-amm-math';
+import { stableswap } from '@yldfi/curve-amm-math';
 import { getStableSwapParams, getOnChainDy } from 'curve-amm-math/rpc';
 
 // Verify accuracy
