@@ -17,6 +17,7 @@ permissions:
 
 env:
   NODE_VERSION: "22"
+  NPM_VERSION: "11.5.1"
   PNPM_VERSION: "11.5.1"
 
 jobs:
@@ -47,8 +48,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Install npm for trusted publishing
+        run: |
+          npm install --global npm@${NPM_VERSION}
+          npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
