@@ -4,6 +4,9 @@
     ".": {
       "release-type": "node",
       "changelog-path": "CHANGELOG.md",
+      "exclude-paths": [
+        ".github"
+      ],
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "draft": false,
