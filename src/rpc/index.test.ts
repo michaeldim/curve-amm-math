@@ -15,12 +15,14 @@ import {
   buildCoinsCalldata,
   computePrecisions,
   normalizeBalances,
+  batchRpcRawCalls,
   batchRpcCalls,
   getPoolCoins,
   getTokenDecimals,
   getPoolBalances,
   getStableSwapParams,
   getCryptoSwapParams,
+  getYieldBasisVirtualPoolParams,
   getTricryptoParams,
   getOnChainDy,
   previewRedeem,
@@ -28,6 +30,14 @@ import {
   getNCoins,
   getExactStableSwapParams,
 } from "./index";
+
+function encodeWord(value: bigint): string {
+  return value.toString(16).padStart(64, "0");
+}
+
+function encodeAddress(address: string): string {
+  return "0x" + "0".repeat(24) + address.slice(2).toLowerCase();
+}
 
 // ============================================================================
 // Pure Function Tests (no mocking required)
@@ -64,6 +74,10 @@ describe("SELECTORS", () => {
       "CONVERT_TO_ASSETS",
       "STORED_RATES",
       "N_COINS",
+      "TOTAL_SUPPLY",
+      "YB_AMM",
+      "YB_POOL",
+      "YB_GET_STATE",
     ];
 
     for (const selector of expectedSelectors) {
@@ -233,6 +247,34 @@ describe("normalizeBalances", () => {
 // Mocked Network Tests
 // ============================================================================
 
+describe("batchRpcRawCalls", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("returns raw ABI data without bigint coercion", async () => {
+    const tupleResult = "0x" + encodeWord(1n) + encodeWord(2n) + encodeWord(3n);
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          { id: 0, result: tupleResult },
+          { id: 1, result: "0x0" },
+        ]),
+    });
+
+    const result = await batchRpcRawCalls("http://localhost:8545", [
+      { to: "0x1", data: "0x1234" },
+      { to: "0x2", data: "0x5678" },
+    ]);
+
+    expect(result).toEqual([tupleResult, "0x0"]);
+  });
+});
+
 describe("batchRpcCalls", () => {
   const originalFetch = global.fetch;
 
@@ -374,6 +416,73 @@ describe("batchRpcCalls", () => {
         signal: expect.any(AbortSignal),
       })
     );
+  });
+});
+
+describe("getYieldBasisVirtualPoolParams", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("fetches and decodes YieldBasis virtual pool params", async () => {
+    const virtualPoolAddress = "0x" + "1".repeat(40);
+    const ammAddress = "0x" + "a".repeat(40);
+    const poolAddress = "0x" + "b".repeat(40);
+
+    const collateral = 5000n * 10n ** 18n;
+    const debt = 500000n * 10n ** 18n;
+    const x0 = 1100000n * 10n ** 18n;
+    const fee = 10n ** 15n;
+    const stableBalance = 1000000n * 10n ** 18n;
+    const assetBalance = 500n * 10n ** 18n;
+    const totalSupply = 10000n * 10n ** 18n;
+
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: encodeAddress(ammAddress) },
+            { id: 1, result: encodeAddress(poolAddress) },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              id: 0,
+              result:
+                "0x" +
+                encodeWord(collateral) +
+                encodeWord(debt) +
+                encodeWord(x0),
+            },
+            { id: 1, result: "0x" + encodeWord(fee) },
+            { id: 2, result: "0x" + encodeWord(stableBalance) },
+            { id: 3, result: "0x" + encodeWord(assetBalance) },
+            { id: 4, result: "0x" + encodeWord(totalSupply) },
+          ]),
+      });
+
+    const params = await getYieldBasisVirtualPoolParams(
+      "http://localhost:8545",
+      virtualPoolAddress
+    );
+
+    expect(params).toEqual({
+      virtualPoolAddress,
+      ammAddress,
+      poolAddress,
+      ammState: { collateral, debt, x0 },
+      poolBalances: [stableBalance, assetBalance],
+      poolTotalSupply: totalSupply,
+      ammFee: fee,
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -18,6 +18,7 @@
 - **StableSwap math** - For pegged asset pools (stablecoins, liquid staking tokens)
 - **Exact precision mode** - Match on-chain results within ±1 wei for all StableSwap pool types
 - **CryptoSwap math** - For volatile asset pairs (Twocrypto-NG, Tricrypto-NG)
+- **YieldBasis virtual pool math** - For YieldBasis stablecoin <-> asset virtual pool quotes
 - **Zero dependencies** - Pure TypeScript with native BigInt
 - **Browser compatible** - Works in Node.js and browsers (ES2020+)
 - **Optional RPC utilities** - Fetch pool parameters via JSON-RPC
@@ -107,6 +108,38 @@ const params3: cryptoswap.TricryptoParams = {
 
 const dy3 = cryptoswap.getDy3(params3, 0, 1, 10n * 10n**18n);
 const lpPrice3 = cryptoswap.lpPrice3(params3, totalSupply);
+```
+
+### YieldBasis Virtual Pools
+
+```typescript
+import { yieldbasis } from '@yldfi/curve-amm-math';
+
+const params: yieldbasis.YieldBasisVirtualPoolParams = {
+  ammState: {
+    collateral: 5000n * 10n**18n,      // LP collateral in the YieldBasis AMM
+    debt: 500000n * 10n**18n,          // Current stablecoin debt
+    x0: 1100000n * 10n**18n,           // AMM get_state().x0
+  },
+  poolBalances: [1000000n * 10n**18n, 500n * 10n**18n], // [stablecoin, asset]
+  poolTotalSupply: 10000n * 10n**18n,
+  ammFee: 10n**15n,                    // 0.1% in 1e18 precision
+};
+
+// Coin 0 is the stablecoin, coin 1 is the crypto asset
+const assetOut = yieldbasis.getDy(params, 0, 1, 10000n * 10n**18n);
+const stableOut = yieldbasis.getDy(params, 1, 0, 5n * 10n**18n);
+const stableIn = yieldbasis.getDx(params, 0, 1, assetOut);
+```
+
+With RPC utilities:
+
+```typescript
+import { yieldbasis } from '@yldfi/curve-amm-math';
+import { getYieldBasisVirtualPoolParams } from '@yldfi/curve-amm-math/rpc';
+
+const params = await getYieldBasisVirtualPoolParams(rpcUrl, virtualPoolAddress);
+const dy = yieldbasis.getDy(params, 0, 1, 10000n * 10n**18n);
 ```
 
 ### Exact Precision Mode (stableswapExact)

@@ -7,12 +7,16 @@
 import { describe, it, expect, vi } from "vitest";
 import * as stableswap from "../stableswap";
 import * as cryptoswap from "../cryptoswap";
+import * as yieldbasis from "../yieldbasis";
 import {
   getStableSwapParams,
   getTricryptoParams,
   getOnChainDy,
   getExactStableSwapParams,
   getStoredRates,
+  getPoolCoins,
+  getTokenDecimals,
+  getYieldBasisVirtualPoolParams,
 } from "./index";
 import * as stableswapExact from "../stableswap-exact";
 
@@ -22,6 +26,11 @@ vi.setConfig({ testTimeout: 30000 });
 // Skip tests if no RPC URL is provided
 const RPC_URL = process.env.RPC_URL;
 const describeIf = RPC_URL ? describe : describe.skip;
+const YB_VIRTUAL_POOL_ADDRESSES =
+  process.env.YB_VIRTUAL_POOL_ADDRESSES?.split(",")
+    .map((address) => address.trim())
+    .filter((address) => address.length > 0);
+const describeYieldBasisIf = RPC_URL ? describe : describe.skip;
 
 // Known Curve pool addresses on Ethereum mainnet
 const POOLS = {
@@ -38,6 +47,19 @@ const POOLS = {
   // StableSwapNG pools
   STETH_ETH: "0x21E27a5E5513D6e65C4f830167390997aA84843a", // stETH/ETH (stETH is rebasing asset type 2)
 };
+
+// Known YieldBasis virtual pools on Ethereum mainnet.
+// Override with YB_VIRTUAL_POOL_ADDRESSES=0x...,0x... to test a custom set.
+const YB_VIRTUAL_POOLS = (
+  YB_VIRTUAL_POOL_ADDRESSES ?? [
+    "0xABf17d1deF75dA1B41B6df5f0b4AecE602b4E045", // WBTC
+    "0x2dA2Aada1445a5101d648F3c8711B070799bbc91", // cbBTC
+    "0xFD1DB6F59fd1FBe0635F3DF11c127B3DDC744092", // tBTC
+  ]
+).map((address, index) => ({
+  name: `YieldBasis virtual pool ${index + 1}`,
+  address,
+}));
 
 // Tolerance for off-chain vs on-chain comparison (0.1% = 10 bps)
 const TOLERANCE_BPS = 10n;
@@ -71,8 +93,110 @@ function assertWithinTolerance(
   ).toBe(true);
 }
 
+async function getNullableOnChainDy(
+  poolAddress: string,
+  i: number,
+  j: number,
+  dx: bigint
+): Promise<bigint | null> {
+  try {
+    return await getOnChainDy(RPC_URL!, poolAddress, i, j, dx, true);
+  } catch {
+    return null;
+  }
+}
+
+function getNullableYieldBasisDy(
+  params: yieldbasis.YieldBasisVirtualPoolParams,
+  i: number,
+  j: number,
+  dx: bigint
+): bigint | null {
+  try {
+    return yieldbasis.getDy(params, i, j, dx);
+  } catch {
+    return null;
+  }
+}
+
+async function assertYieldBasisExactMatch(
+  virtualPoolAddress: string,
+  i: number,
+  j: number,
+  dx: bigint,
+  label: string
+): Promise<void> {
+  let lastError = "";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const params = await getYieldBasisVirtualPoolParams(
+      RPC_URL!,
+      virtualPoolAddress,
+      { strict: true }
+    );
+    const offChain = getNullableYieldBasisDy(params, i, j, dx);
+    const onChain = await getNullableOnChainDy(virtualPoolAddress, i, j, dx);
+
+    if (offChain === null && onChain === null) return;
+    if (offChain !== null && onChain !== null && offChain === onChain) return;
+
+    lastError =
+      `${label}: off-chain ${offChain?.toString() ?? "revert"} vs ` +
+      `on-chain ${onChain?.toString() ?? "revert"} on attempt ${attempt + 1}`;
+  }
+
+  expect(false, lastError).toBe(true);
+}
+
 // 3pool token decimals: DAI=18, USDC=6, USDT=6
 const THREEPOOL_DECIMALS = [18, 6, 6];
+
+describeYieldBasisIf("YieldBasis VirtualPool - Exact Parity", () => {
+  for (const pool of YB_VIRTUAL_POOLS) {
+    describe(`${pool.name} (${pool.address})`, () => {
+      it("matches on-chain get_dy exactly for stablecoin->asset", async () => {
+        const coins = await getPoolCoins(RPC_URL!, pool.address, 2);
+        const [stableDecimals] = await getTokenDecimals(RPC_URL!, coins);
+        const stableUnit = 10n ** BigInt(stableDecimals);
+        const swapSizes = [1n, 100n, 10000n].map(
+          (tokens) => tokens * stableUnit
+        );
+
+        for (const dx of swapSizes) {
+          await assertYieldBasisExactMatch(
+            pool.address,
+            0,
+            1,
+            dx,
+            `${pool.name} stablecoin->asset dx=${dx}`
+          );
+        }
+      });
+
+      it("matches on-chain get_dy exactly for asset->stablecoin", async () => {
+        const coins = await getPoolCoins(RPC_URL!, pool.address, 2);
+        const decimals = await getTokenDecimals(RPC_URL!, coins);
+        const assetUnit = 10n ** BigInt(decimals[1]);
+        const baseAssetSize = assetUnit / 10000n > 0n ? assetUnit / 10000n : 1n;
+        const swapSizes = [
+          baseAssetSize,
+          baseAssetSize * 10n,
+          baseAssetSize * 100n,
+        ];
+
+        for (const dx of swapSizes) {
+          await assertYieldBasisExactMatch(
+            pool.address,
+            1,
+            0,
+            dx,
+            `${pool.name} asset->stablecoin dx=${dx}`
+          );
+        }
+      });
+    });
+  }
+});
 
 describeIf("RPC Integration Tests", () => {
   describe("StableSwap - 3pool", () => {

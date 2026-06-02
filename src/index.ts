@@ -75,6 +75,15 @@ export type {
   TricryptoParams,
 } from "./cryptoswap";
 
+// YieldBasis virtual pool math (stablecoin <-> asset via YieldBasis AMM)
+export * as yieldbasis from "./yieldbasis";
+export type {
+  YieldBasisAmmState,
+  YieldBasisVirtualPoolCalculation,
+  YieldBasisVirtualPoolParams,
+  YieldBasisVirtualPoolRpcParams,
+} from "./yieldbasis";
+
 // Re-export commonly used constants
 export {
   A_PRECISION,

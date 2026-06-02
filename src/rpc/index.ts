@@ -21,6 +21,7 @@
 
 import type { StableSwapPoolParams } from "../stableswap";
 import type { CryptoSwapParams, TricryptoParams } from "../cryptoswap";
+import type { YieldBasisVirtualPoolRpcParams } from "../yieldbasis";
 import { A_PRECISION } from "../stableswap";
 
 // Function selectors (4-byte function signatures)
@@ -54,6 +55,14 @@ export const SELECTORS = {
   // StableSwapNG specific
   STORED_RATES: "0xfd0684b1", // stored_rates() - returns dynamic rates
   N_COINS: "0x29357750", // N_COINS() - returns number of coins
+
+  // ERC20 functions
+  TOTAL_SUPPLY: "0x18160ddd", // totalSupply()
+
+  // YieldBasis virtual pool functions
+  YB_AMM: "0x44a70686", // AMM()
+  YB_POOL: "0x7535d246", // POOL()
+  YB_GET_STATE: "0x86b301ad", // get_state() - returns (collateral, debt, x0)
 } as const;
 
 interface RpcCall {
@@ -91,20 +100,19 @@ export interface BatchRpcOptions {
 }
 
 /**
- * Execute multiple eth_call requests in a single HTTP request
- * Reduces latency by batching RPC calls
+ * Execute multiple eth_call requests and return raw ABI-encoded results.
  *
  * @param rpcUrl - JSON-RPC endpoint URL
  * @param calls - Array of { to, data } call objects
  * @param options - Optional settings (strict mode, etc.)
- * @returns Array of bigint results (null if call failed and not in strict mode)
+ * @returns Array of raw hex results (null if call failed and not in strict mode)
  * @throws Error if strict mode is enabled and any call fails
  */
-export async function batchRpcCalls(
+export async function batchRpcRawCalls(
   rpcUrl: string,
   calls: RpcCall[],
   options: BatchRpcOptions = {}
-): Promise<(bigint | null)[]> {
+): Promise<(string | null)[]> {
   if (calls.length === 0) return [];
 
   const batch = calls.map((call, id) => ({
@@ -162,15 +170,41 @@ export async function batchRpcCalls(
   const results = json as RpcBatchResult[];
   results.sort((a, b) => a.id - b.id);
 
-  const parsed = results.map((r, idx) => {
+  return results.map((r, idx) => {
     if (r.error) {
       if (options.strict) {
         throw new Error(`RPC call ${idx} failed: ${r.error.message} (to: ${calls[idx].to})`);
       }
       return null;
     }
-    if (r.result && r.result !== "0x" && r.result !== "0x0") {
-      return BigInt(r.result);
+    if (r.result && r.result !== "0x") return r.result;
+    if (options.strict) {
+      throw new Error(`RPC call ${idx} returned empty result (to: ${calls[idx].to})`);
+    }
+    return null;
+  });
+}
+
+/**
+ * Execute multiple eth_call requests in a single HTTP request
+ * Reduces latency by batching RPC calls
+ *
+ * @param rpcUrl - JSON-RPC endpoint URL
+ * @param calls - Array of { to, data } call objects
+ * @param options - Optional settings (strict mode, etc.)
+ * @returns Array of bigint results (null if call failed and not in strict mode)
+ * @throws Error if strict mode is enabled and any call fails
+ */
+export async function batchRpcCalls(
+  rpcUrl: string,
+  calls: RpcCall[],
+  options: BatchRpcOptions = {}
+): Promise<(bigint | null)[]> {
+  const rawResults = await batchRpcRawCalls(rpcUrl, calls, options);
+
+  const parsed = rawResults.map((result, idx) => {
+    if (result && result !== "0x" && result !== "0x0") {
+      return BigInt(result);
     }
     if (options.strict) {
       throw new Error(`RPC call ${idx} returned empty result (to: ${calls[idx].to})`);
@@ -223,6 +257,42 @@ export function buildCoinsCalldata(index: number): string {
   return SELECTORS.COINS + encodeUint256(index);
 }
 
+function bigintToAddress(value: bigint): string {
+  return "0x" + value.toString(16).padStart(40, "0").slice(-40);
+}
+
+function requireRawResult(
+  result: string | null,
+  label: string,
+  address: string
+): string {
+  if (result === null) {
+    throw new Error(`Failed to fetch ${label} from ${address}`);
+  }
+  return result;
+}
+
+function decodeUint256Word(hexData: string): bigint {
+  const data = hexData.startsWith("0x") ? hexData.slice(2) : hexData;
+  if (data.length === 0) return 0n;
+  return BigInt("0x" + data);
+}
+
+function decodeUint256Tuple(hexData: string, count: number): bigint[] {
+  const data = hexData.startsWith("0x") ? hexData.slice(2) : hexData;
+  const expectedLength = count * 64;
+  if (data.length < expectedLength) {
+    throw new Error(`Invalid uint256 tuple result: expected ${count} words`);
+  }
+
+  const values: bigint[] = [];
+  for (let i = 0; i < count; i++) {
+    const start = i * 64;
+    values.push(BigInt("0x" + data.slice(start, start + 64)));
+  }
+  return values;
+}
+
 /**
  * Fetch token addresses from a Curve pool
  */
@@ -239,8 +309,7 @@ export async function getPoolCoins(
   const results = await batchRpcCalls(rpcUrl, calls);
   return results.map((r) => {
     if (r === null) return "0x0000000000000000000000000000000000000000";
-    // Convert bigint to address (last 20 bytes)
-    return "0x" + r.toString(16).padStart(40, "0");
+    return bigintToAddress(r);
   });
 }
 
@@ -478,6 +547,87 @@ export async function getCryptoSwapParams(
     priceScale: results[8] ?? 10n ** 18n,
     balances: [results[0] ?? 0n, results[1] ?? 0n],
     precisions: options.precisions ?? [1n, 1n],
+  };
+}
+
+/**
+ * Options for fetching YieldBasis virtual pool parameters
+ */
+export interface YieldBasisVirtualPoolFetchOptions {
+  /**
+   * If true, throw an error if any RPC call fails or returns invalid data.
+   * Default: false for batch calls, though missing required addresses still throw.
+   */
+  strict?: boolean;
+}
+
+/**
+ * Fetch YieldBasis virtual pool parameters in batched JSON-RPC calls.
+ *
+ * This reads VirtualPool.AMM(), VirtualPool.POOL(), AMM.get_state(),
+ * AMM.fee(), backing pool balances, and backing pool totalSupply().
+ */
+export async function getYieldBasisVirtualPoolParams(
+  rpcUrl: string,
+  virtualPoolAddress: string,
+  options: YieldBasisVirtualPoolFetchOptions = {}
+): Promise<YieldBasisVirtualPoolRpcParams> {
+  const [ammResult, poolResult] = await batchRpcCalls(
+    rpcUrl,
+    [
+      { to: virtualPoolAddress, data: SELECTORS.YB_AMM },
+      { to: virtualPoolAddress, data: SELECTORS.YB_POOL },
+    ],
+    { strict: options.strict }
+  );
+
+  if (ammResult === null) {
+    throw new Error(`Failed to fetch AMM address from ${virtualPoolAddress}`);
+  }
+  if (poolResult === null) {
+    throw new Error(`Failed to fetch backing pool address from ${virtualPoolAddress}`);
+  }
+
+  const ammAddress = bigintToAddress(ammResult);
+  const poolAddress = bigintToAddress(poolResult);
+
+  const rawResults = await batchRpcRawCalls(
+    rpcUrl,
+    [
+      { to: ammAddress, data: SELECTORS.YB_GET_STATE },
+      { to: ammAddress, data: SELECTORS.FEE },
+      { to: poolAddress, data: buildBalancesCalldata(0) },
+      { to: poolAddress, data: buildBalancesCalldata(1) },
+      { to: poolAddress, data: SELECTORS.TOTAL_SUPPLY },
+    ],
+    { strict: options.strict }
+  );
+
+  const [collateral, debt, x0] = decodeUint256Tuple(
+    requireRawResult(rawResults[0], "AMM.get_state()", ammAddress),
+    3
+  );
+  const ammFee = decodeUint256Word(
+    requireRawResult(rawResults[1], "AMM.fee()", ammAddress)
+  );
+  const stableBalance = decodeUint256Word(
+    requireRawResult(rawResults[2], "pool.balances(0)", poolAddress)
+  );
+  const assetBalance = decodeUint256Word(
+    requireRawResult(rawResults[3], "pool.balances(1)", poolAddress)
+  );
+  const poolTotalSupply = decodeUint256Word(
+    requireRawResult(rawResults[4], "pool.totalSupply()", poolAddress)
+  );
+
+  return {
+    virtualPoolAddress,
+    ammAddress,
+    poolAddress,
+    ammState: { collateral, debt, x0 },
+    poolBalances: [stableBalance, assetBalance],
+    poolTotalSupply,
+    ammFee,
   };
 }
 
