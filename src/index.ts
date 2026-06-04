@@ -75,6 +75,10 @@ export type {
   TricryptoParams,
 } from "./cryptoswap";
 
+// Curve TwocryptoView quotes for pools backed by StableswapMath.
+export * as twocryptoNg from "./twocrypto-ng";
+export type { TwocryptoNgParams } from "./twocrypto-ng";
+
 // YieldBasis virtual pool math (stablecoin <-> asset via YieldBasis AMM)
 export * as yieldbasis from "./yieldbasis";
 export type {
