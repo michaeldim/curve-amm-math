@@ -2,7 +2,8 @@
  * curve-amm-math
  *
  * Off-chain TypeScript implementations of Curve AMM math for gas-free calculations.
- * Supports StableSwap (2-8 coins) and CryptoSwap (2-3 coins) pool types.
+ * Supports StableSwap (2-8 coins), CryptoSwap (2-3 coins), LlamaLend
+ * LLAMMA, YieldBasis virtual pools, and triCRV/3pool helpers.
  *
  * @example Basic StableSwap usage
  * ```typescript
@@ -87,6 +88,18 @@ export type {
   YieldBasisVirtualPoolParams,
   YieldBasisVirtualPoolRpcParams,
 } from "./yieldbasis";
+
+// Curve LlamaLend LLAMMA math (borrowed token <-> collateral)
+export * as llamalend from "./llamalend";
+export type {
+  LlamaLendAmmParams,
+  LlamaLendBandBalances,
+  LlamaLendDetailedTrade,
+} from "./llamalend";
+
+// triCRV / classic 3pool convenience helpers
+export * as tricrv from "./tricrv";
+export type { TriCrvPoolParams } from "./tricrv";
 
 // Re-export commonly used constants
 export {

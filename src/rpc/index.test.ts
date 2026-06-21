@@ -7,10 +7,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   SELECTORS,
   encodeUint256,
+  encodeInt256,
   buildGetDyCalldata,
   buildGetDyFactoryCalldata,
+  buildGetDxCalldata,
   buildBalancesCalldata,
   buildPriceScaleCalldata,
+  buildBandsXCalldata,
+  buildBandsYCalldata,
+  buildPOracleUpCalldata,
   buildPreviewRedeemCalldata,
   buildCoinsCalldata,
   computePrecisions,
@@ -25,10 +30,14 @@ import {
   getYieldBasisVirtualPoolParams,
   getTricryptoParams,
   getOnChainDy,
+  getOnChainDx,
   previewRedeem,
   getStoredRates,
   getNCoins,
   getExactStableSwapParams,
+  getBlockNumber,
+  getTriCrvParams,
+  getLlamaLendAmmParams,
 } from "./index";
 
 function encodeWord(value: bigint): string {
@@ -37,6 +46,10 @@ function encodeWord(value: bigint): string {
 
 function encodeAddress(address: string): string {
   return "0x" + "0".repeat(24) + address.slice(2).toLowerCase();
+}
+
+function encodeSignedWord(value: bigint): string {
+  return BigInt.asUintN(256, value).toString(16).padStart(64, "0");
 }
 
 // ============================================================================
@@ -78,6 +91,14 @@ describe("SELECTORS", () => {
       "YB_AMM",
       "YB_POOL",
       "YB_GET_STATE",
+      "GET_DX_UINT256",
+      "ACTIVE_BAND",
+      "MIN_BAND",
+      "MAX_BAND",
+      "BANDS_X",
+      "BANDS_Y",
+      "PRICE_ORACLE",
+      "P_ORACLE_UP",
     ];
 
     for (const selector of expectedSelectors) {
@@ -119,6 +140,17 @@ describe("encodeUint256", () => {
   });
 });
 
+describe("encodeInt256", () => {
+  it("should encode positive signed values", () => {
+    expect(encodeInt256(1)).toBe("0".repeat(63) + "1");
+  });
+
+  it("should encode negative signed values as two's-complement", () => {
+    expect(encodeInt256(-1)).toBe("f".repeat(64));
+    expect(encodeInt256(-2)).toBe("f".repeat(63) + "e");
+  });
+});
+
 describe("buildGetDyCalldata", () => {
   it("should build correct calldata for int128 indices", () => {
     const data = buildGetDyCalldata(0, 1, 1000n);
@@ -145,6 +177,14 @@ describe("buildGetDyFactoryCalldata", () => {
   });
 });
 
+describe("buildGetDxCalldata", () => {
+  it("should build correct calldata for uint256 get_dx", () => {
+    const data = buildGetDxCalldata(0, 1, 1000n);
+    expect(data).toMatch(/^0x37ed3a7a/);
+    expect(data).toHaveLength(2 + 8 + 64 * 3);
+  });
+});
+
 describe("buildBalancesCalldata", () => {
   it("should build correct calldata for balance query", () => {
     const data = buildBalancesCalldata(0);
@@ -164,6 +204,18 @@ describe("buildPriceScaleCalldata", () => {
   it("should build correct calldata for price_scale query", () => {
     const data = buildPriceScaleCalldata(0);
     expect(data).toBe(SELECTORS.PRICE_SCALE_I + encodeUint256(0));
+  });
+});
+
+describe("LlamaLend calldata builders", () => {
+  it("should build calldata for signed band lookups", () => {
+    expect(buildBandsXCalldata(-1)).toBe(SELECTORS.BANDS_X + "f".repeat(64));
+    expect(buildBandsYCalldata(-2)).toBe(
+      SELECTORS.BANDS_Y + "f".repeat(63) + "e"
+    );
+    expect(buildPOracleUpCalldata(3)).toBe(
+      SELECTORS.P_ORACLE_UP + encodeUint256(3)
+    );
   });
 });
 
@@ -328,17 +380,24 @@ describe("batchRpcCalls", () => {
     expect(result).toEqual([null, null]);
   });
 
-  it("should handle non-array response", async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ error: "something went wrong" }),
-    });
+  it("should fall back to individual calls for non-array batch responses", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ error: "batch requests are not supported" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: 0, result: "0x2a" }),
+      });
 
     const result = await batchRpcCalls("http://localhost:8545", [
       { to: "0x1", data: "0x1234" },
     ]);
 
-    expect(result).toEqual([null]);
+    expect(result).toEqual([42n]);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("should throw on HTTP error", async () => {
@@ -416,6 +475,52 @@ describe("batchRpcCalls", () => {
         signal: expect.any(AbortSignal),
       })
     );
+  });
+
+  it("should encode blockTag on batched and fallback calls", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ error: "batch requests are not supported" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: 0, result: "0x2a" }),
+      });
+
+    const result = await batchRpcCalls(
+      "http://localhost:8545",
+      [{ to: "0x1", data: "0x1234" }],
+      { blockTag: 123n }
+    );
+
+    expect(result).toEqual([42n]);
+    const batchBody = JSON.parse(
+      (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body
+    );
+    const fallbackBody = JSON.parse(
+      (global.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body
+    );
+    expect(batchBody[0].params[1]).toBe("0x7b");
+    expect(fallbackBody.params[1]).toBe("0x7b");
+  });
+});
+
+describe("getBlockNumber", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should fetch the current block number", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ id: 1, result: "0x7b" }),
+    });
+
+    await expect(getBlockNumber("http://localhost:8545")).resolves.toBe(123n);
   });
 });
 
@@ -778,6 +883,142 @@ describe("getTricryptoParams", () => {
   });
 });
 
+describe("getTriCrvParams", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should fetch classic 3pool params with triCRV rates", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          { id: 0, result: "0x" + (1_000_000n * 10n ** 18n).toString(16) },
+          { id: 1, result: "0x" + (1_000_000n * 10n ** 6n).toString(16) },
+          { id: 2, result: "0x" + (1_000_000n * 10n ** 6n).toString(16) },
+          { id: 3, result: "0x" + (2000n).toString(16) },
+          { id: 4, result: "0x" + (1_000_000n).toString(16) },
+          { id: 5, result: "0x" + (0n).toString(16) },
+        ]),
+    });
+
+    const params = await getTriCrvParams("http://localhost:8545");
+
+    expect(params.nCoins).toBe(3);
+    expect(params.balances).toEqual([
+      1_000_000n * 10n ** 18n,
+      1_000_000n * 10n ** 6n,
+      1_000_000n * 10n ** 6n,
+    ]);
+    expect(params.rates).toEqual([10n ** 18n, 10n ** 30n, 10n ** 30n]);
+    expect(params.A).toBe(2000n);
+  });
+});
+
+describe("getLlamaLendAmmParams", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should fetch signed bands and precision-scaled LLAMMA params", async () => {
+    const amm = "0x1111111111111111111111111111111111111111";
+    const borrowed = "0x2222222222222222222222222222222222222222";
+    const collateral = "0x3333333333333333333333333333333333333333";
+
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: "0x" + encodeWord(100n) },
+            { id: 1, result: "0x" + encodeWord(6n * 10n ** 15n) },
+            { id: 2, result: "0x" + encodeSignedWord(-1n) },
+            { id: 3, result: "0x" + encodeSignedWord(-2n) },
+            { id: 4, result: "0x" + encodeSignedWord(0n) },
+            { id: 5, result: "0x" + encodeWord(2000n * 10n ** 18n) },
+            { id: 6, result: encodeAddress(borrowed) },
+            { id: 7, result: encodeAddress(collateral) },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: "0x" + encodeWord(18n) },
+            { id: 1, result: "0x" + encodeWord(6n) },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: "0x" + encodeWord(2010n * 10n ** 18n) },
+            { id: 1, result: "0x" + encodeWord(12n * 10n ** 18n) },
+            { id: 2, result: "0x" + encodeWord(0n) },
+            { id: 3, result: "0x" + encodeWord(8n * 10n ** 18n) },
+            { id: 4, result: "0x" + encodeWord(5n * 10n ** 18n) },
+            { id: 5, result: "0x" + encodeWord(0n) },
+            { id: 6, result: "0x" + encodeWord(9n * 10n ** 18n) },
+          ]),
+      });
+
+    const params = await getLlamaLendAmmParams(
+      "http://localhost:8545",
+      amm
+    );
+
+    expect(params.activeBand).toBe(-1);
+    expect(params.minBand).toBe(-2);
+    expect(params.maxBand).toBe(0);
+    expect(params.pOracleUp).toBe(2010n * 10n ** 18n);
+    expect(params.coins).toEqual([borrowed, collateral]);
+    expect(params.decimals).toEqual([18, 6]);
+    expect(params.borrowedPrecision).toBe(1n);
+    expect(params.collateralPrecision).toBe(10n ** 12n);
+    expect(params.fetchedBands).toEqual([-2, -1, 0]);
+    expect((params.bandsX as Record<number, bigint>)[-2]).toBe(12n * 10n ** 18n);
+    expect((params.bandsY as Record<number, bigint>)[-1]).toBe(5n * 10n ** 18n);
+  });
+
+  it("should enforce the band fetch safety cap", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: "0x" + encodeWord(100n) },
+            { id: 1, result: "0x" + encodeWord(6n * 10n ** 15n) },
+            { id: 2, result: "0x" + encodeSignedWord(0n) },
+            { id: 3, result: "0x" + encodeSignedWord(0n) },
+            { id: 4, result: "0x" + encodeSignedWord(10n) },
+            { id: 5, result: "0x" + encodeWord(2000n * 10n ** 18n) },
+            { id: 6, result: encodeAddress("0x2222222222222222222222222222222222222222") },
+            { id: 7, result: encodeAddress("0x3333333333333333333333333333333333333333") },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { id: 0, result: "0x" + encodeWord(18n) },
+            { id: 1, result: "0x" + encodeWord(18n) },
+          ]),
+      });
+
+    await expect(
+      getLlamaLendAmmParams("http://localhost:8545", "0xamm", {
+        maxBandFetch: 2,
+      })
+    ).rejects.toThrow("refusing to fetch 11 bands");
+  });
+});
+
 describe("getOnChainDy", () => {
   const originalFetch = global.fetch;
 
@@ -833,6 +1074,33 @@ describe("getOnChainDy", () => {
     );
 
     expect(result).toBeNull();
+  });
+});
+
+describe("getOnChainDx", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should return dx result", async () => {
+    const dx = 1001n * 10n ** 18n;
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([{ id: 0, result: "0x" + dx.toString(16) }]),
+    });
+
+    const result = await getOnChainDx(
+      "http://localhost:8545",
+      "0xpool",
+      0,
+      1,
+      10n ** 18n
+    );
+
+    expect(result).toBe(dx);
   });
 });
 

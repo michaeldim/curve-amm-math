@@ -3,20 +3,25 @@
  * These tests require RPC access and are skipped if RPC_URL is not set.
  *
  * Run with: RPC_URL=https://eth.llamarpc.com pnpm test src/rpc/integration.test.ts
+ * LlamaLend Optimism tests additionally require OPTIMISM_RPC_URL.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll } from "vitest";
 import * as stableswap from "../stableswap";
 import * as cryptoswap from "../cryptoswap";
 import * as yieldbasis from "../yieldbasis";
+import * as llamalend from "../llamalend";
 import {
   getStableSwapParams,
   getTricryptoParams,
   getOnChainDy,
+  getOnChainDx,
   getExactStableSwapParams,
   getStoredRates,
   getPoolCoins,
   getTokenDecimals,
   getYieldBasisVirtualPoolParams,
+  getBlockNumber,
+  getLlamaLendAmmParams,
 } from "./index";
 import * as stableswapExact from "../stableswap-exact";
 
@@ -26,11 +31,22 @@ vi.setConfig({ testTimeout: 30000 });
 // Skip tests if no RPC URL is provided
 const RPC_URL = process.env.RPC_URL;
 const describeIf = RPC_URL ? describe : describe.skip;
+const OPTIMISM_RPC_URL = process.env.OPTIMISM_RPC_URL;
+const describeOptimismIf = OPTIMISM_RPC_URL ? describe : describe.skip;
 const YB_VIRTUAL_POOL_ADDRESSES =
   process.env.YB_VIRTUAL_POOL_ADDRESSES?.split(",")
     .map((address) => address.trim())
     .filter((address) => address.length > 0);
 const describeYieldBasisIf = RPC_URL ? describe : describe.skip;
+const LLAMALEND_OPTIMISM_AMM =
+  process.env.LLAMALEND_OPTIMISM_AMM ??
+  "0x86372d2844acb9f1fed32b80aebbe3cc50124c72";
+const LLAMALEND_OPTIMISM_BAND_TO = Number(
+  process.env.LLAMALEND_OPTIMISM_BAND_TO ?? "160"
+);
+const LLAMALEND_MAINNET_AMM = process.env.LLAMALEND_MAINNET_AMM;
+const describeMainnetLlamaLendIf =
+  RPC_URL && LLAMALEND_MAINNET_AMM ? describe : describe.skip;
 
 // Known Curve pool addresses on Ethereum mainnet
 const POOLS = {
@@ -103,6 +119,48 @@ async function getNullableOnChainDy(
     return await getOnChainDy(RPC_URL!, poolAddress, i, j, dx, true);
   } catch {
     return null;
+  }
+}
+
+async function assertLlamaLendDyExactMatch(
+  rpcUrl: string,
+  ammAddress: string,
+  params: llamalend.LlamaLendAmmParams,
+  i: number,
+  j: number,
+  dx: bigint,
+  label: string,
+  blockTag?: string | number | bigint
+): Promise<void> {
+  const offChain = llamalend.getDy(params, i, j, dx);
+  const onChain = await getOnChainDy(rpcUrl, ammAddress, i, j, dx, true, {
+    blockTag,
+  });
+
+  expect(onChain).not.toBeNull();
+  if (onChain !== null) {
+    assertExactMatch(offChain, onChain, label);
+  }
+}
+
+async function assertLlamaLendDxExactMatch(
+  rpcUrl: string,
+  ammAddress: string,
+  params: llamalend.LlamaLendAmmParams,
+  i: number,
+  j: number,
+  dy: bigint,
+  label: string,
+  blockTag?: string | number | bigint
+): Promise<void> {
+  const offChain = llamalend.getDx(params, i, j, dy);
+  const onChain = await getOnChainDx(rpcUrl, ammAddress, i, j, dy, {
+    blockTag,
+  });
+
+  expect(onChain).not.toBeNull();
+  if (onChain !== null) {
+    assertExactMatch(offChain, onChain, label);
   }
 }
 
@@ -196,6 +254,146 @@ describeYieldBasisIf("YieldBasis VirtualPool - Exact Parity", () => {
       });
     });
   }
+});
+
+describeOptimismIf("LlamaLend LLAMMA - Optimism v2 WBTC exact parity", () => {
+  let params: Awaited<ReturnType<typeof getLlamaLendAmmParams>>;
+  let blockTag: bigint;
+
+  beforeAll(async () => {
+    blockTag = await getBlockNumber(OPTIMISM_RPC_URL!);
+    params = await getLlamaLendAmmParams(
+      OPTIMISM_RPC_URL!,
+      LLAMALEND_OPTIMISM_AMM,
+      {
+        bandRange: { from: 0, to: LLAMALEND_OPTIMISM_BAND_TO },
+        maxBandFetch: LLAMALEND_OPTIMISM_BAND_TO + 1,
+        blockTag,
+        strict: true,
+      }
+    );
+  });
+
+  it("fetches the expected v2 WBTC market state", () => {
+    expect(params.A).toBeGreaterThan(0n);
+    expect(params.fee).toBeGreaterThan(0n);
+    expect(params.coins[0].toLowerCase()).toBe(
+      "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
+    );
+    expect(params.coins[1].toLowerCase()).toBe(
+      "0x68f180fcce6836688e9084f035309e29bf0a2095"
+    );
+    expect(params.decimals).toEqual([6, 8]);
+    expect(params.fetchedBands).toContain(params.activeBand);
+  });
+
+  it("matches on-chain get_dy for USDC->WBTC across band-crossing sizes", async () => {
+    const borrowedUnit = 10n ** BigInt(params.decimals[0]);
+    const swapSizes = [1n, 100n, 1000n].map((tokens) => tokens * borrowedUnit);
+
+    for (const dx of swapSizes) {
+      await assertLlamaLendDyExactMatch(
+        OPTIMISM_RPC_URL!,
+        LLAMALEND_OPTIMISM_AMM,
+        params,
+        0,
+        1,
+        dx,
+        `Optimism LlamaLend USDC->WBTC dx=${dx}`,
+        blockTag
+      );
+    }
+  });
+
+  it("matches on-chain get_dx for exact WBTC outputs", async () => {
+    const collateralUnit = 10n ** BigInt(params.decimals[1]);
+    const desiredOutputs = [
+      collateralUnit / 100000n,
+      collateralUnit / 1000n,
+      collateralUnit / 100n,
+    ].filter((amount) => amount > 0n);
+
+    for (const dy of desiredOutputs) {
+      await assertLlamaLendDxExactMatch(
+        OPTIMISM_RPC_URL!,
+        LLAMALEND_OPTIMISM_AMM,
+        params,
+        0,
+        1,
+        dy,
+        `Optimism LlamaLend USDC->WBTC get_dx dy=${dy}`,
+        blockTag
+      );
+    }
+  });
+
+  it("matches on-chain get_dy for WBTC->USDC in the current band state", async () => {
+    const collateralUnit = 10n ** BigInt(params.decimals[1]);
+    const baseSize = collateralUnit / 100000n > 0n ? collateralUnit / 100000n : 1n;
+    const swapSizes = [baseSize, baseSize * 10n, baseSize * 100n];
+
+    for (const dx of swapSizes) {
+      await assertLlamaLendDyExactMatch(
+        OPTIMISM_RPC_URL!,
+        LLAMALEND_OPTIMISM_AMM,
+        params,
+        1,
+        0,
+        dx,
+        `Optimism LlamaLend WBTC->USDC dx=${dx}`,
+        blockTag
+      );
+    }
+  });
+});
+
+describeMainnetLlamaLendIf("LlamaLend LLAMMA - configurable mainnet market exact parity", () => {
+  let params: Awaited<ReturnType<typeof getLlamaLendAmmParams>>;
+  let blockTag: bigint;
+
+  beforeAll(async () => {
+    const bandFrom = process.env.LLAMALEND_MAINNET_BAND_FROM;
+    const bandTo = process.env.LLAMALEND_MAINNET_BAND_TO;
+    const maxBandFetch = Number(process.env.LLAMALEND_MAINNET_MAX_BAND_FETCH ?? "512");
+    blockTag = await getBlockNumber(RPC_URL!);
+
+    params = await getLlamaLendAmmParams(RPC_URL!, LLAMALEND_MAINNET_AMM!, {
+      ...(bandFrom !== undefined && bandTo !== undefined
+        ? { bandRange: { from: Number(bandFrom), to: Number(bandTo) } }
+        : {}),
+      maxBandFetch,
+      blockTag,
+      strict: true,
+    });
+  });
+
+  it("matches on-chain get_dy in both directions for small inputs", async () => {
+    const borrowedUnit = 10n ** BigInt(params.decimals[0]);
+    const collateralUnit = 10n ** BigInt(params.decimals[1]);
+    const borrowedIn = borrowedUnit / 100n > 0n ? borrowedUnit / 100n : 1n;
+    const collateralIn = collateralUnit / 100000n > 0n ? collateralUnit / 100000n : 1n;
+
+    await assertLlamaLendDyExactMatch(
+      RPC_URL!,
+      LLAMALEND_MAINNET_AMM!,
+      params,
+      0,
+      1,
+      borrowedIn,
+      `Mainnet LlamaLend coin0->coin1 dx=${borrowedIn}`,
+      blockTag
+    );
+    await assertLlamaLendDyExactMatch(
+      RPC_URL!,
+      LLAMALEND_MAINNET_AMM!,
+      params,
+      1,
+      0,
+      collateralIn,
+      `Mainnet LlamaLend coin1->coin0 dx=${collateralIn}`,
+      blockTag
+    );
+  });
 });
 
 describeIf("RPC Integration Tests", () => {

@@ -22,7 +22,10 @@
 import type { StableSwapPoolParams } from "../stableswap";
 import type { CryptoSwapParams, TricryptoParams } from "../cryptoswap";
 import type { YieldBasisVirtualPoolRpcParams } from "../yieldbasis";
+import type { LlamaLendAmmParams } from "../llamalend";
 import { A_PRECISION } from "../stableswap";
+import { computeRates } from "../stableswap-exact";
+import { TRICRV_DECIMALS, TRICRV_POOL_ADDRESS } from "../tricrv";
 
 // Function selectors (4-byte function signatures)
 export const SELECTORS = {
@@ -63,6 +66,16 @@ export const SELECTORS = {
   YB_AMM: "0x44a70686", // AMM()
   YB_POOL: "0x7535d246", // POOL()
   YB_GET_STATE: "0x86b301ad", // get_state() - returns (collateral, debt, x0)
+
+  // LlamaLend LLAMMA functions
+  GET_DX_UINT256: "0x37ed3a7a", // get_dx(uint256,uint256,uint256)
+  ACTIVE_BAND: "0x8f8654c5", // active_band()
+  MIN_BAND: "0xca72a821", // min_band()
+  MAX_BAND: "0xaaa615fc", // max_band()
+  BANDS_X: "0xebcb0067", // bands_x(int256)
+  BANDS_Y: "0x31f7e306", // bands_y(int256)
+  PRICE_ORACLE: "0x86fc88d3", // price_oracle()
+  P_ORACLE_UP: "0x2eb858e7", // p_oracle_up(int256)
 } as const;
 
 interface RpcCall {
@@ -76,11 +89,23 @@ interface RpcBatchResult {
   error?: { message: string };
 }
 
+interface RpcSingleResult {
+  result?: string;
+  error?: { message: string };
+}
+
 /**
  * Encode a uint256 parameter for calldata
  */
 export function encodeUint256(value: bigint | string | number): string {
   return BigInt(value).toString(16).padStart(64, "0");
+}
+
+/**
+ * Encode a signed int256 parameter using two's-complement ABI encoding.
+ */
+export function encodeInt256(value: bigint | string | number): string {
+  return BigInt.asUintN(256, BigInt(value)).toString(16).padStart(64, "0");
 }
 
 /**
@@ -97,6 +122,93 @@ export interface BatchRpcOptions {
    * Default: 30000 (30 seconds)
    */
   timeout?: number;
+  /**
+   * Block tag used for eth_call requests. Use a hex block number or tags such
+   * as "latest", "safe", or "finalized". Default: "latest".
+   */
+  blockTag?: string | number | bigint;
+}
+
+function encodeBlockTag(blockTag?: string | number | bigint): string {
+  if (blockTag === undefined) return "latest";
+  if (typeof blockTag === "string") return blockTag;
+
+  const value = BigInt(blockTag);
+  if (value < 0n) {
+    throw new Error("blockTag: value cannot be negative");
+  }
+  return "0x" + value.toString(16);
+}
+
+async function fetchJsonRpc(
+  rpcUrl: string,
+  body: unknown,
+  timeout: number
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  let response: Response;
+  try {
+    response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`RPC request timed out after ${timeout}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `RPC request failed: HTTP ${response.status} ${response.statusText}`
+    );
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`RPC request failed: Invalid JSON response from ${rpcUrl}`);
+  }
+}
+
+async function singleRpcRawCall(
+  rpcUrl: string,
+  call: RpcCall,
+  idx: number,
+  options: BatchRpcOptions,
+  timeout: number
+): Promise<string | null> {
+  const json = await fetchJsonRpc(
+    rpcUrl,
+    {
+      jsonrpc: "2.0",
+      id: idx,
+      method: "eth_call",
+      params: [{ to: call.to, data: call.data }, encodeBlockTag(options.blockTag)],
+    },
+    timeout
+  );
+
+  const result = json as RpcSingleResult;
+  if (result.error) {
+    if (options.strict) {
+      throw new Error(`RPC call ${idx} failed: ${result.error.message} (to: ${call.to})`);
+    }
+    return null;
+  }
+  if (result.result && result.result !== "0x") return result.result;
+  if (options.strict) {
+    throw new Error(`RPC call ${idx} returned empty result (to: ${call.to})`);
+  }
+  return null;
 }
 
 /**
@@ -119,52 +231,18 @@ export async function batchRpcRawCalls(
     jsonrpc: "2.0",
     id,
     method: "eth_call",
-    params: [{ to: call.to, data: call.data }, "latest"],
+    params: [{ to: call.to, data: call.data }, encodeBlockTag(options.blockTag)],
   }));
 
-  // Set up timeout with AbortController
   const timeout = options.timeout ?? 30000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const json = await fetchJsonRpc(rpcUrl, batch, timeout);
 
-  let response: Response;
-  try {
-    response = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(batch),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`RPC request timed out after ${timeout}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  // Check HTTP status before parsing JSON
-  if (!response.ok) {
-    throw new Error(
-      `RPC request failed: HTTP ${response.status} ${response.statusText}`
-    );
-  }
-
-  let json: unknown;
-  try {
-    json = await response.json();
-  } catch {
-    throw new Error(`RPC request failed: Invalid JSON response from ${rpcUrl}`);
-  }
-
-  // Handle case where response is not an array
+  // Some public RPCs do not support JSON-RPC batch requests. Fall back to
+  // individual eth_call requests so optional RPC helpers still work there.
   if (!Array.isArray(json)) {
-    if (options.strict) {
-      throw new Error("RPC batch response is not an array");
-    }
-    return calls.map(() => null);
+    return Promise.all(
+      calls.map((call, idx) => singleRpcRawCall(rpcUrl, call, idx, options, timeout))
+    );
   }
 
   const results = json as RpcBatchResult[];
@@ -216,6 +294,35 @@ export async function batchRpcCalls(
 }
 
 /**
+ * Fetch the current block number from an RPC endpoint.
+ */
+export async function getBlockNumber(
+  rpcUrl: string,
+  options: Pick<BatchRpcOptions, "timeout"> = {}
+): Promise<bigint> {
+  const timeout = options.timeout ?? 30000;
+  const json = await fetchJsonRpc(
+    rpcUrl,
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_blockNumber",
+      params: [],
+    },
+    timeout
+  );
+
+  const result = json as RpcSingleResult;
+  if (result.error) {
+    throw new Error(`RPC block number request failed: ${result.error.message}`);
+  }
+  if (!result.result || result.result === "0x") {
+    throw new Error("RPC block number request returned empty result");
+  }
+  return BigInt(result.result);
+}
+
+/**
  * Build calldata for get_dy (int128 indices - old-style pools)
  */
 export function buildGetDyCalldata(i: number, j: number, dx: bigint | string): string {
@@ -230,6 +337,13 @@ export function buildGetDyFactoryCalldata(i: number, j: number, dx: bigint | str
 }
 
 /**
+ * Build calldata for get_dx(uint256,uint256,uint256)
+ */
+export function buildGetDxCalldata(i: number, j: number, dy: bigint | string): string {
+  return SELECTORS.GET_DX_UINT256 + encodeUint256(i) + encodeUint256(j) + encodeUint256(dy);
+}
+
+/**
  * Build calldata for balances(uint256)
  */
 export function buildBalancesCalldata(index: number): string {
@@ -241,6 +355,27 @@ export function buildBalancesCalldata(index: number): string {
  */
 export function buildPriceScaleCalldata(index: number): string {
   return SELECTORS.PRICE_SCALE_I + encodeUint256(index);
+}
+
+/**
+ * Build calldata for bands_x(int256)
+ */
+export function buildBandsXCalldata(band: number): string {
+  return SELECTORS.BANDS_X + encodeInt256(band);
+}
+
+/**
+ * Build calldata for bands_y(int256)
+ */
+export function buildBandsYCalldata(band: number): string {
+  return SELECTORS.BANDS_Y + encodeInt256(band);
+}
+
+/**
+ * Build calldata for p_oracle_up(int256)
+ */
+export function buildPOracleUpCalldata(band: number): string {
+  return SELECTORS.P_ORACLE_UP + encodeInt256(band);
 }
 
 /**
@@ -278,6 +413,11 @@ function decodeUint256Word(hexData: string): bigint {
   return BigInt("0x" + data);
 }
 
+function decodeInt256Word(hexData: string): number {
+  const value = decodeUint256Word(hexData);
+  return Number(BigInt.asIntN(256, value));
+}
+
 function decodeUint256Tuple(hexData: string, count: number): bigint[] {
   const data = hexData.startsWith("0x") ? hexData.slice(2) : hexData;
   const expectedLength = count * 64;
@@ -299,14 +439,15 @@ function decodeUint256Tuple(hexData: string, count: number): bigint[] {
 export async function getPoolCoins(
   rpcUrl: string,
   poolAddress: string,
-  numCoins: number = 2
+  numCoins: number = 2,
+  options: BatchRpcOptions = {}
 ): Promise<string[]> {
   const calls = Array.from({ length: numCoins }, (_, i) => ({
     to: poolAddress,
     data: buildCoinsCalldata(i),
   }));
 
-  const results = await batchRpcCalls(rpcUrl, calls);
+  const results = await batchRpcCalls(rpcUrl, calls, options);
   return results.map((r) => {
     if (r === null) return "0x0000000000000000000000000000000000000000";
     return bigintToAddress(r);
@@ -318,14 +459,15 @@ export async function getPoolCoins(
  */
 export async function getTokenDecimals(
   rpcUrl: string,
-  tokenAddresses: string[]
+  tokenAddresses: string[],
+  options: BatchRpcOptions = {}
 ): Promise<number[]> {
   const calls = tokenAddresses.map((addr) => ({
     to: addr,
     data: SELECTORS.DECIMALS,
   }));
 
-  const results = await batchRpcCalls(rpcUrl, calls);
+  const results = await batchRpcCalls(rpcUrl, calls, options);
   return results.map((r) => (r !== null ? Number(r) : 18)); // Default to 18 if fetch fails
 }
 
@@ -364,14 +506,15 @@ export function normalizeBalances(balances: bigint[], precisions: bigint[]): big
 export async function getPoolBalances(
   rpcUrl: string,
   poolAddress: string,
-  numCoins: number = 2
+  numCoins: number = 2,
+  options: BatchRpcOptions = {}
 ): Promise<bigint[]> {
   const calls = Array.from({ length: numCoins }, (_, i) => ({
     to: poolAddress,
     data: buildBalancesCalldata(i),
   }));
 
-  const results = await batchRpcCalls(rpcUrl, calls);
+  const results = await batchRpcCalls(rpcUrl, calls, options);
   return results.map((r) => r ?? 0n);
 }
 
@@ -453,8 +596,12 @@ export async function getStableSwapParams(
       decimals = options.normalize;
     } else {
       // Fetch token addresses then decimals
-      const coins = await getPoolCoins(rpcUrl, poolAddress, numCoins);
-      decimals = await getTokenDecimals(rpcUrl, coins);
+      const coins = await getPoolCoins(rpcUrl, poolAddress, numCoins, {
+        strict: options.strict,
+      });
+      decimals = await getTokenDecimals(rpcUrl, coins, {
+        strict: options.strict,
+      });
     }
 
     // Compute precisions and normalize balances
@@ -718,13 +865,30 @@ export async function getOnChainDy(
   i: number,
   j: number,
   dx: bigint | string,
-  useFactorySelector: boolean = false
+  useFactorySelector: boolean = false,
+  options: BatchRpcOptions = {}
 ): Promise<bigint | null> {
   const data = useFactorySelector
     ? buildGetDyFactoryCalldata(i, j, dx)
     : buildGetDyCalldata(i, j, dx);
 
-  const [result] = await batchRpcCalls(rpcUrl, [{ to: poolAddress, data }]);
+  const [result] = await batchRpcCalls(rpcUrl, [{ to: poolAddress, data }], options);
+  return result;
+}
+
+/**
+ * Get on-chain get_dx result for comparison/verification.
+ */
+export async function getOnChainDx(
+  rpcUrl: string,
+  poolAddress: string,
+  i: number,
+  j: number,
+  dy: bigint | string,
+  options: BatchRpcOptions = {}
+): Promise<bigint | null> {
+  const data = buildGetDxCalldata(i, j, dy);
+  const [result] = await batchRpcCalls(rpcUrl, [{ to: poolAddress, data }], options);
   return result;
 }
 
@@ -952,5 +1116,208 @@ export async function getExactStableSwapParams(
     fee,
     offpegFeeMultiplier,
     nCoins: numCoins,
+  };
+}
+
+/**
+ * Options for fetching classic 3pool / triCRV parameters.
+ */
+export interface TriCrvFetchOptions {
+  /**
+   * If true, throw an error if any RPC call fails or returns invalid data.
+   * Default: false.
+   */
+  strict?: boolean;
+}
+
+/**
+ * Fetch exact precision parameters for Curve's classic 3pool / triCRV.
+ *
+ * triCRV is a classic StableSwap pool (DAI/USDC/USDT), not Tricrypto-NG.
+ */
+export async function getTriCrvParams(
+  rpcUrl: string,
+  poolAddress: string = TRICRV_POOL_ADDRESS,
+  options: TriCrvFetchOptions = {}
+): Promise<ExactStableSwapParams> {
+  const params = await getStableSwapParams(rpcUrl, poolAddress, 3, {
+    strict: options.strict,
+  });
+
+  return {
+    balances: params.rawBalances ?? params.balances,
+    rates: computeRates([...TRICRV_DECIMALS]),
+    A: params.A,
+    fee: params.fee,
+    offpegFeeMultiplier: params.offpegFeeMultiplier,
+    nCoins: 3,
+  };
+}
+
+export interface LlamaLendAmmRpcParams extends LlamaLendAmmParams {
+  /** LlamaLend AMM address. */
+  ammAddress: string;
+  /** Token addresses: [borrowed token, collateral token]. */
+  coins: [string, string];
+  /** Token decimals: [borrowed token, collateral token]. */
+  decimals: [number, number];
+  /** Bands included in the returned bandsX/bandsY maps. */
+  fetchedBands: number[];
+}
+
+/**
+ * Options for fetching LlamaLend AMM parameters.
+ */
+export interface LlamaLendAmmFetchOptions {
+  /**
+   * Explicit band list to fetch. If omitted, the helper fetches min_band..max_band.
+   */
+  bands?: number[];
+  /**
+   * Explicit inclusive band range to fetch. Ignored when `bands` is provided.
+   */
+  bandRange?: { from: number; to: number };
+  /**
+   * Safety cap for fetched bands. Default: 256.
+   */
+  maxBandFetch?: number;
+  /**
+   * Block tag used for all AMM/token reads. Pin this for exact parity checks.
+   * Default: "latest".
+   */
+  blockTag?: BatchRpcOptions["blockTag"];
+  /**
+   * If true, throw an error if any RPC call fails or returns invalid data.
+   * Default: false.
+   */
+  strict?: boolean;
+}
+
+function buildBandList(
+  minBand: number,
+  maxBand: number,
+  options: LlamaLendAmmFetchOptions
+): number[] {
+  let bands: number[];
+  if (options.bands) {
+    bands = [...options.bands];
+  } else {
+    const from = options.bandRange?.from ?? minBand;
+    const to = options.bandRange?.to ?? maxBand;
+    if (from > to) {
+      throw new Error(`getLlamaLendAmmParams: invalid band range ${from}..${to}`);
+    }
+    bands = Array.from({ length: to - from + 1 }, (_, idx) => from + idx);
+  }
+
+  const maxBandFetch = options.maxBandFetch ?? 256;
+  if (bands.length > maxBandFetch) {
+    throw new Error(
+      `getLlamaLendAmmParams: refusing to fetch ${bands.length} bands; ` +
+        `increase maxBandFetch or pass an explicit bands list`
+    );
+  }
+
+  return bands;
+}
+
+/**
+ * Fetch Curve LlamaLend LLAMMA parameters for off-chain quotes.
+ *
+ * The returned band balances are already in the AMM's internal precision-scaled
+ * units, and public `llamalend.getDy/getDx` inputs remain native token amounts.
+ */
+export async function getLlamaLendAmmParams(
+  rpcUrl: string,
+  ammAddress: string,
+  options: LlamaLendAmmFetchOptions = {}
+): Promise<LlamaLendAmmRpcParams> {
+  const coreResults = await batchRpcRawCalls(
+    rpcUrl,
+    [
+      { to: ammAddress, data: SELECTORS.A },
+      { to: ammAddress, data: SELECTORS.FEE },
+      { to: ammAddress, data: SELECTORS.ACTIVE_BAND },
+      { to: ammAddress, data: SELECTORS.MIN_BAND },
+      { to: ammAddress, data: SELECTORS.MAX_BAND },
+      { to: ammAddress, data: SELECTORS.PRICE_ORACLE },
+      { to: ammAddress, data: buildCoinsCalldata(0) },
+      { to: ammAddress, data: buildCoinsCalldata(1) },
+    ],
+    { strict: options.strict, blockTag: options.blockTag }
+  );
+
+  const A = decodeUint256Word(requireRawResult(coreResults[0], "A()", ammAddress));
+  const fee = decodeUint256Word(requireRawResult(coreResults[1], "fee()", ammAddress));
+  const activeBand = decodeInt256Word(
+    requireRawResult(coreResults[2], "active_band()", ammAddress)
+  );
+  const minBand = decodeInt256Word(
+    requireRawResult(coreResults[3], "min_band()", ammAddress)
+  );
+  const maxBand = decodeInt256Word(
+    requireRawResult(coreResults[4], "max_band()", ammAddress)
+  );
+  const pOracle = decodeUint256Word(
+    requireRawResult(coreResults[5], "price_oracle()", ammAddress)
+  );
+  const coins: [string, string] = [
+    bigintToAddress(decodeUint256Word(requireRawResult(coreResults[6], "coins(0)", ammAddress))),
+    bigintToAddress(decodeUint256Word(requireRawResult(coreResults[7], "coins(1)", ammAddress))),
+  ];
+
+  const fetchedBands = buildBandList(minBand, maxBand, options);
+  const decimals = (await getTokenDecimals(rpcUrl, coins, {
+    strict: options.strict,
+    blockTag: options.blockTag,
+  })) as [number, number];
+  const precisions = computePrecisions(decimals) as [bigint, bigint];
+
+  const bandCalls: RpcCall[] = [
+    { to: ammAddress, data: buildPOracleUpCalldata(activeBand) },
+  ];
+  for (const band of fetchedBands) {
+    bandCalls.push(
+      { to: ammAddress, data: buildBandsXCalldata(band) },
+      { to: ammAddress, data: buildBandsYCalldata(band) }
+    );
+  }
+
+  const bandResults = await batchRpcRawCalls(rpcUrl, bandCalls, {
+    strict: options.strict,
+    blockTag: options.blockTag,
+  });
+
+  const pOracleUp = decodeUint256Word(
+    requireRawResult(bandResults[0], `p_oracle_up(${activeBand})`, ammAddress)
+  );
+  const bandsX: Record<number, bigint> = {};
+  const bandsY: Record<number, bigint> = {};
+  for (let idx = 0; idx < fetchedBands.length; idx++) {
+    const band = fetchedBands[idx];
+    bandsX[band] = decodeUint256Word(
+      requireRawResult(bandResults[1 + idx * 2], `bands_x(${band})`, ammAddress)
+    );
+    bandsY[band] = decodeUint256Word(
+      requireRawResult(bandResults[2 + idx * 2], `bands_y(${band})`, ammAddress)
+    );
+  }
+
+  return {
+    ammAddress,
+    coins,
+    decimals,
+    fetchedBands,
+    A,
+    fee,
+    activeBand,
+    minBand,
+    maxBand,
+    pOracle,
+    pOracleUp,
+    bandsX,
+    bandsY,
+    borrowedPrecision: precisions[0],
+    collateralPrecision: precisions[1],
   };
 }

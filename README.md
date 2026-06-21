@@ -19,6 +19,8 @@
 - **Exact precision mode** - Match on-chain results within ±1 wei for all StableSwap pool types
 - **CryptoSwap math** - For volatile asset pairs (Twocrypto-NG, Tricrypto-NG)
 - **YieldBasis virtual pool math** - For YieldBasis stablecoin <-> asset virtual pool quotes
+- **LlamaLend LLAMMA math** - For Curve LlamaLend borrowed token <-> collateral AMM quotes
+- **triCRV helpers** - Classic 3pool exact StableSwap helpers (DAI/USDC/USDT)
 - **Zero dependencies** - Pure TypeScript with native BigInt
 - **Browser compatible** - Works in Node.js and browsers (ES2020+)
 - **Optional RPC utilities** - Fetch pool parameters via JSON-RPC
@@ -140,6 +142,43 @@ import { getYieldBasisVirtualPoolParams } from '@yldfi/curve-amm-math/rpc';
 
 const params = await getYieldBasisVirtualPoolParams(rpcUrl, virtualPoolAddress);
 const dy = yieldbasis.getDy(params, 0, 1, 10000n * 10n**18n);
+```
+
+### LlamaLend LLAMMA
+
+```typescript
+import { llamalend } from '@yldfi/curve-amm-math';
+import { getBlockNumber, getLlamaLendAmmParams } from '@yldfi/curve-amm-math/rpc';
+
+const blockTag = await getBlockNumber(rpcUrl);
+const params = await getLlamaLendAmmParams(rpcUrl, ammAddress, {
+  // Pin mutable LLAMMA state for exact on-chain comparisons.
+  blockTag,
+  // Optional: widen this if min_band..max_band has more than 256 bands.
+  maxBandFetch: 512,
+});
+
+// Coin 0 is the borrowed token, usually crvUSD. Coin 1 is collateral.
+const collateralOut = llamalend.getDy(params, 0, 1, 1000n * 10n**18n);
+const borrowedOut = llamalend.getDy(params, 1, 0, 1n * 10n**18n);
+const borrowedIn = llamalend.getDx(params, 0, 1, collateralOut);
+const fullQuote = llamalend.quote(params, 0, 1, 1000n * 10n**18n);
+```
+
+### triCRV / Classic 3pool
+
+`triCRV` is the LP token for Curve's classic 3pool (`DAI/USDC/USDT`). It is
+StableSwap math, not Tricrypto-NG.
+
+```typescript
+import { tricrv } from '@yldfi/curve-amm-math';
+import { getTriCrvParams } from '@yldfi/curve-amm-math/rpc';
+
+const params = await getTriCrvParams(rpcUrl);
+
+// Native decimals: DAI has 18, USDC and USDT have 6.
+const usdcOut = tricrv.getDy(params, 0, 1, 1000n * 10n**18n);
+const daiIn = tricrv.getDx(params, 0, 1, 100n * 10n**6n);
 ```
 
 ### Exact Precision Mode (stableswapExact)
@@ -339,12 +378,34 @@ interface ExactPoolParams {
 | `findPegPoint(params, i, j)` | Max amount with >= 1:1 rate |
 | `getAGammaAtTime(...)` | A/gamma during ramping |
 
+### LlamaLend - Core Functions
+
+| Function | Description |
+|----------|-------------|
+| `getDy(params, i, j, dx)` | Exact-input LLAMMA output quote |
+| `getDx(params, i, j, dy)` | Exact-output LLAMMA input quote |
+| `quote(params, i, j, dx)` | Full exact-input quote with touched bands |
+| `quoteExactOut(params, i, j, dy)` | Full exact-output quote with touched bands |
+| `getDynamicFee(A, pOracle, pOracleUp)` | Band/oracle dynamic fee |
+| `getY0(A, x, y, pOracle, pOracleUp)` | Per-band invariant helper |
+
+### triCRV - Classic 3pool Helpers
+
+| Function | Description |
+|----------|-------------|
+| `createTriCrvParams(balances, A, fee, offpegFeeMultiplier?)` | Create exact 3pool params |
+| `getDy(params, i, j, dx)` | Exact 3pool output quote |
+| `getDx(params, i, j, dy)` | Exact 3pool input quote |
+
 ### RPC Utilities
 
 | Function | Description |
 |----------|-------------|
 | `getStableSwapParams(rpcUrl, pool, nCoins?, options?)` | Fetch StableSwap pool params |
 | `getExactStableSwapParams(rpcUrl, pool)` | Fetch exact precision params with stored_rates() |
+| `getTriCrvParams(rpcUrl, pool?)` | Fetch exact classic 3pool / triCRV params |
+| `getLlamaLendAmmParams(rpcUrl, amm, options?)` | Fetch LLAMMA params and band balances |
+| `getBlockNumber(rpcUrl)` | Fetch a block number for pinned exact RPC reads |
 | `getCryptoSwapParams(rpcUrl, pool, precisions?)` | Fetch CryptoSwap 2-coin params |
 | `getTricryptoParams(rpcUrl, pool, precisions?)` | Fetch Tricrypto 3-coin params |
 | `getOnChainDy(rpcUrl, pool, i, j, dx, factory?)` | On-chain get_dy for verification |
@@ -384,13 +445,16 @@ console.assert(diff <= tolerance, 'Off-chain calculation exceeds tolerance');
 | StableSwap (legacy) | Registry | `stableswap` | `stableswapExact` | 2-4 |
 | StableSwapNG | 12 | `stableswap` | `stableswapExact` | 2-8 |
 | StableSwapNG (oracle) | 12 | `stableswap` | `stableswapExact` + `stored_rates()` | 2-8 |
+| triCRV / 3pool | Registry | `tricrv` / `stableswapExact` | `stableswapExact` | 3 |
 | Twocrypto-NG | 13 | `cryptoswap` | - | 2 |
 | Tricrypto-NG | 11 | `cryptoswap` | - | 3 |
+| LlamaLend LLAMMA | Lending | `llamalend` | - | 2 |
 
 ## References
 
 - [StableSwap whitepaper](https://curve.fi/files/stableswap-paper.pdf)
 - [CryptoSwap whitepaper](https://curve.fi/files/crypto-pools-paper.pdf)
+- [Curve stablecoin AMM source](https://github.com/curvefi/curve-stablecoin/blob/master/curve_stablecoin/AMM.vy)
 - [RareSkills: Curve get_d get_y](https://www.rareskills.io/post/curve-get-d-get-y)
 - [Curve Meta Registry](https://etherscan.io/address/0xF98B45FA17DE75FB1aD0e7aFD971b0ca00e379fC)
 
